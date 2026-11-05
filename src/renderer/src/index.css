@@ -1,0 +1,132 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Cairo', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', Consolas, monospace;
+
+  /* Elnagdi POS Clean Retail Light Palette */
+  --color-bg-primary: #f4f6fa;
+  --color-bg-secondary: #ffffff;
+  --color-bg-card: #ffffff;
+
+  --color-border-subtle: rgba(0, 0, 0, 0.08);
+  --color-border-default: #e2e8f0;
+  --color-border-active: #2563eb;
+
+  --color-text-primary: #1e293b;
+  --color-text-secondary: #475569;
+  --color-text-muted: #64748b;
+
+  --color-accent-blue: #2563eb;
+  --color-accent-emerald: #059669;
+  --color-accent-rose: #dc2626;
+  --color-accent-amber: #d97706;
+}
+
+@layer base {
+  * {
+    border-color: #e2e8f0;
+  }
+
+  html, body {
+    font-family: 'Cairo', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    background-color: #f4f6fa;
+    color: #1e293b;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Prevent broken Arabic cursive ligatures anywhere in the app */
+  [dir="rtl"], [lang="ar"], .arabic-text, input, button, select, textarea {
+    font-family: 'Cairo', system-ui, sans-serif;
+    letter-spacing: 0 !important;
+    word-spacing: normal !important;
+  }
+
+  /* Monospace ONLY for numbers, prices, IDs, and barcodes */
+  .font-mono, [data-tabular] {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Crisp Clean Light Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+/* Card & Surface Tokens */
+.pos-card {
+  background-color: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  border-radius: 10px;
+}
+
+.pos-card-header {
+  border-bottom: 1px solid #f1f5f9;
+  background-color: #fafbfd;
+}
+
+/* Thermal Printer Rules (80mm & 58mm Rolls) */
+@media print {
+  @page {
+    size: auto;
+    margin: 0;
+  }
+
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Hide entire UI except thermal receipt */
+  body * {
+    visibility: hidden;
+  }
+
+  #thermal-receipt,
+  #thermal-receipt * {
+    visibility: visible;
+  }
+
+  #thermal-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    margin: 0 !important;
+    padding: 2mm 3mm !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .print\:hidden {
+    display: none !important;
+  }
+}
+

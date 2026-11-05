@@ -1,0 +1,90 @@
+{
+  "name": "titan-modern-pos",
+  "version": "1.0.0",
+  "description": "Mariam Elhomeily Pharmacy - Modern Pharmacy Management System",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "build:electron": "node build-electron.js",
+    "build:renderer": "vite build",
+    "build": "npm run build:electron && npm run build:renderer",
+    "dev": "concurrently -k \"node build-electron.js --watch\" \"vite\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER=1 electron dist-electron/main.cjs\"",
+    "start": "electron dist-electron/main.cjs",
+    "package:dir": "npm run build && electron-builder --win --dir",
+    "package:portable": "npm run build && electron-builder --win portable",
+    "package": "npm run package:dir",
+    "verify": "tsx scripts/verify_phase1.ts"
+  },
+  "dependencies": {
+    "@fontsource/cairo": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "better-sqlite3": "^13.0.3",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.64.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "autoprefixer": "^10.4.27",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "40.10.2",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.27.3",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "wait-on": "^8.0.4"
+  },
+  "build": {
+    "appId": "com.mariamelhomeily.pos",
+    "productName": "Mariam Elhomeily Pharmacy",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "data/pharmacy.sqlite",
+        "to": "data/pharmacy.sqlite"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "Mariam_Elhomeily_Pharmacy_Portable.exe"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
+    "npmRebuild": false
+  }
+}
