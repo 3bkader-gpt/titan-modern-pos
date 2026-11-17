@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Item, SaveItemPayload } from '../../../shared/types';
+import { Item, SaveItemPayload } from '../../../../shared/types';
 import { Edit3, Plus, X, Check, AlertCircle, Barcode, Calendar, ShieldAlert } from 'lucide-react';
 
 interface EditStockModalProps {

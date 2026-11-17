@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Customer } from '../../../shared/types';
+import { Customer } from '../../../../shared/types';
 import { 
   Banknote, 
   CreditCard, 

@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { CreateSaleInvoiceResult } from '../../../shared/types';
+import { CreateSaleInvoiceResult } from '../../../../shared/types';
 import { Printer, X, Building2 } from 'lucide-react';
 
 interface ThermalReceiptModalProps {
@@ -19,20 +19,22 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({ invoic
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        e.stopImmediatePropagation();
         onClose();
       } else if (e.key === 'Enter') {
         e.preventDefault();
+        e.stopImmediatePropagation();
         handlePrint();
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
   }, [onClose]);
 
   const is80mm = paperWidth === '80mm';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto font-sans">
+    <div data-modal-open="true" className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto font-sans">
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in-95 duration-150">
         
         {/* Modal Action Header */}
@@ -97,11 +99,6 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({ invoic
               </div>
               <p className="text-[11px] font-bold text-slate-900">صيدلية د. مريم الحميلي</p>
               <p className="text-[9px] text-slate-600 print:text-black">خدمة ورعاية صيدلانية متكاملة</p>
-              <div className="text-[9px] text-slate-500 print:text-black flex items-center justify-center gap-2">
-                <span>ت: 01000000000</span>
-                <span>•</span>
-                <span>س.ت: 45892</span>
-              </div>
             </div>
 
             {/* Invoice Meta */}

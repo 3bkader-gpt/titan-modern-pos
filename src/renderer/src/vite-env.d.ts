@@ -31,12 +31,16 @@ import {
   TopItem,
   StagnantItem,
   UserAccount,
-  AuditLogs
+  AuditLogs,
+  LedgerIntegrityStatus,
+  StorageInfo,
+  ChangeDataDirResult
 } from '../../shared/types';
 
 declare global {
   interface Window {
     electronAPI: {
+      checkLedgerIntegrity: () => Promise<LedgerIntegrityStatus>;
       searchItems: (query: string, filterInStockOnly?: boolean, limit?: number) => Promise<Item[]>;
       getAlternatives: (itemId: number) => Promise<Item[]>;
       getMedicalAlerts: (genericName?: string | null, taxCategory?: number | null) => Promise<MedicalAlert[]>;
@@ -47,7 +51,7 @@ declare global {
       returnSaleInvoice: (invoiceNumber: number, itemsToReturn?: ReturnItemPayload[]) => Promise<ReturnSaleInvoiceResult>;
       getCustomers: (query?: string) => Promise<Customer[]>;
       addCustomer: (name: string, phone?: string, address?: string) => Promise<Customer>;
-      getInvoiceForReturn: (invoiceNumber: number) => Promise<{ invoice: SalesInvoice; items: SalesInvoiceItem[] } | null>;
+      getInvoiceForReturn: (invoiceNumber: number) => Promise<{ invoice: SalesInvoice; items: SalesInvoiceItem[]; is_fully_returned?: boolean } | null>;
       
       // Phase 3 APIs
       getInventoryFilter: (filterType: InventoryFilterType, page: number, limit: number, searchQuery?: string) => Promise<InventoryFilterResult>;
@@ -88,6 +92,11 @@ declare global {
       performBackup: () => Promise<BackupStatus>;
       getBackupStatus: () => Promise<BackupStatus>;
       onBackupStatusChange: (callback: (status: BackupStatus) => void) => () => void;
+
+      getStorageInfo: () => Promise<StorageInfo>;
+      chooseDataDirectory: () => Promise<ChangeDataDirResult>;
+      confirmCurrentDataDirectory: () => Promise<StorageInfo>;
+      openDataDirectory: () => Promise<{ success: boolean }>;
     };
   }
 }

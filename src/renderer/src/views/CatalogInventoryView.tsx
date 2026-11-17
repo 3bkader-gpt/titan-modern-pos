@@ -128,7 +128,7 @@ export const CatalogInventoryView: React.FC = () => {
   };
 
   // Helper for expiry styling
-  const isExpiringSoon = (expiryStr?: string) => {
+  const isExpiringSoon = (expiryStr?: string | null) => {
     if (!expiryStr) return false;
     const parts = expiryStr.split('-');
     if (parts.length === 2) {
@@ -467,7 +467,7 @@ export const CatalogInventoryView: React.FC = () => {
                             onClick={() => setSubstituteItem({
                               item_id: item.item_id,
                               item_name: item.item_name_en,
-                              generic_name: item.generic_name,
+                              generic_name: item.generic_name || undefined,
                               consumer_price: item.consumer_price,
                               package_units: item.package_units
                             })}

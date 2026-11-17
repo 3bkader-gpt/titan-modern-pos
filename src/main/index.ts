@@ -1,7 +1,8 @@
-import { app, BrowserWindow, ipcMain, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, Notification, dialog } from 'electron';
 import path from 'path';
 import { 
   initDatabase,
+  closeDatabase,
   checkLedgerIntegrity, 
   searchItems, 
   getAlternatives, 
@@ -46,8 +47,16 @@ import {
   performBackup, 
   getCurrentBackupStatus, 
   startUsbWatcher, 
+  stopUsbWatcher,
   onBackupStatusChanged 
 } from './backup';
+import {
+  resolveStartupDatabasePath,
+  getStorageInfo,
+  chooseAndMoveDataDirectory,
+  confirmCurrentDataDirectory,
+  openDataDirectoryInExplorer
+} from './storageConfig';
 import { 
   CreateSaleInvoicePayload, 
   ReturnItemPayload,
@@ -287,46 +296,89 @@ function registerIpcHandlers() {
       mainWindow.webContents.send('backup:statusChanged', status);
     }
   });
+
+  // Data Storage Configuration Handlers
+  ipcMain.handle('storage:getInfo', async () => {
+    return getStorageInfo();
+  });
+
+  ipcMain.handle('storage:chooseDirectory', async () => {
+    return await chooseAndMoveDataDirectory(mainWindow);
+  });
+
+  ipcMain.handle('storage:confirmCurrent', async () => {
+    return confirmCurrentDataDirectory();
+  });
+
+  ipcMain.handle('storage:openInExplorer', async () => {
+    return openDataDirectoryInExplorer();
+  });
 }
 
-app.whenReady().then(() => {
-  // Initialize Database engine
-  try {
-    initDatabase();
-    console.log('[Database] Initialized successfully with WAL mode and FTS5.');
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
-    // Startup Accounting Ledger Integrity Check
-    const ledgerStatus = checkLedgerIntegrity();
-    if (!ledgerStatus.balanced) {
-      if (Notification.isSupported()) {
-        new Notification({
-          title: 'تحذير مالي - عدم توازن ميزان المراجعة',
-          body: `يوجد فارق في دفتر الأستاذ العام بمقدار ${ledgerStatus.diff.toFixed(2)} ج.م (المدين: ${ledgerStatus.total_debit.toFixed(2)} | الدائن: ${ledgerStatus.total_credit.toFixed(2)})`
-        }).show();
-      }
-    }
-  } catch (err) {
-    console.error('[Database Init Error]', err);
-  }
-
-  // Register IPC handlers
-  registerIpcHandlers();
-
-  // Start USB watcher
-  startUsbWatcher();
-
-  // Create Window
-  createWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
     }
   });
-});
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+  app.whenReady().then(() => {
+    // Initialize Database engine via persistent user-selectable storage resolution
+    try {
+      const { dbPath } = resolveStartupDatabasePath();
+      initDatabase(dbPath);
+      console.log(`[Database] Initialized successfully at "${dbPath}" with WAL mode and FTS5.`);
+
+      // Startup Accounting Ledger Integrity Check
+      const ledgerStatus = checkLedgerIntegrity();
+      if (!ledgerStatus.balanced) {
+        if (Notification.isSupported()) {
+          new Notification({
+            title: 'تحذير مالي - عدم توازن ميزان المراجعة',
+            body: `يوجد فارق في دفتر الأستاذ العام بمقدار ${ledgerStatus.diff.toFixed(2)} ج.م (المدين: ${ledgerStatus.total_debit.toFixed(2)} | الدائن: ${ledgerStatus.total_credit.toFixed(2)})`
+          }).show();
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[Database Init Error]', err);
+      dialog.showErrorBox(
+        'خطأ في تشغيل قاعدة البيانات',
+        `تعذر فتح قاعدة بيانات الصيدلية.\n\nالتفاصيل:\n${msg}`
+      );
+      app.quit();
+      return;
+    }
+
+    // Register IPC handlers
+    registerIpcHandlers();
+
+    // Start USB watcher
+    startUsbWatcher();
+
+    // Create Window
+    createWindow();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+      }
+    });
+  });
+
+  app.on('before-quit', () => {
+    stopUsbWatcher();
+    closeDatabase();
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+}

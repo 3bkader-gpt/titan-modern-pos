@@ -6,21 +6,26 @@ import {
   HardDrive, 
   Usb, 
   RefreshCw,
-  Pill
+  Pill,
+  FolderOpen
 } from 'lucide-react';
-import { DashboardStats, BackupStatus } from '../../../shared/types';
+import { DashboardStats, BackupStatus, StorageInfo } from '../../../shared/types';
 
 interface HeaderProps {
   stats: DashboardStats | null;
   backupStatus: BackupStatus | null;
+  storageInfo?: StorageInfo | null;
   onTriggerBackup: () => void;
+  onOpenStorageModal: () => void;
   isBackingUp: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   stats,
   backupStatus,
+  storageInfo,
   onTriggerBackup,
+  onOpenStorageModal,
   isBackingUp
 }) => {
   const [currentTime, setCurrentTime] = useState<string>('');
@@ -164,6 +169,22 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isBackingUp ? 'animate-spin' : ''}`} style={{ color: '#64748b' }} />
             <span>نسخ احتياطي</span>
+          </button>
+
+          <button
+            onClick={onOpenStorageModal}
+            title={storageInfo?.dataDir ? `المسار الحالي: ${storageInfo.dataDir}` : 'اختيار مكان حفظ الداتا'}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold transition-all cursor-pointer"
+            style={{
+              background: 'rgba(16,185,129,0.14)',
+              color: '#a7f3d0',
+              border: '1px solid rgba(16,185,129,0.28)'
+            }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(16,185,129,0.24)'; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(16,185,129,0.14)'; }}
+          >
+            <FolderOpen className="w-3.5 h-3.5" style={{ color: '#34d399' }} />
+            <span>مكان الداتا</span>
           </button>
         </div>
       </div>

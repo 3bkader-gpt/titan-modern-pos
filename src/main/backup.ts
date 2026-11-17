@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { getDatabaseInstance } from './db';
+import { getDatabaseInstance, getActiveDatabasePath } from './db';
 import { BackupStatus, BackupStateCode } from '../shared/types';
 
 const execAsync = promisify(exec);
@@ -36,7 +36,8 @@ export async function detectUsbDrive(): Promise<string | null> {
   try {
     // DriveType = 2 corresponds to Removable Disk (USB Flash Drive)
     const { stdout } = await execAsync(
-      'powershell -NoProfile -Command "Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -eq 2 } | Select-Object -ExpandProperty DeviceID"'
+      'powershell -NoProfile -Command "Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -eq 2 } | Select-Object -ExpandProperty DeviceID"',
+      { windowsHide: true, timeout: 5000 }
     );
     const driveLetters = stdout
       .split(/\r?\n/)
@@ -57,7 +58,9 @@ export async function detectUsbDrive(): Promise<string | null> {
  */
 export async function performBackup(): Promise<BackupStatus> {
   const db = getDatabaseInstance();
-  const backupDir = path.resolve(process.cwd(), 'data', 'backups');
+  const activeDbPath = getActiveDatabasePath();
+  const baseDataDir = activeDbPath ? path.dirname(activeDbPath) : path.resolve(process.cwd(), 'data');
+  const backupDir = path.join(baseDataDir, 'backups');
 
   if (!fs.existsSync(backupDir)) {
     fs.mkdirSync(backupDir, { recursive: true });
@@ -127,12 +130,38 @@ export async function performBackup(): Promise<BackupStatus> {
   }
 }
 
+let usbWatcherTimer: ReturnType<typeof setInterval> | null = null;
+let lastMountedDrivesSignature: string | null = null;
+
+function getMountedDrivesSignature(): string {
+  const letters: string[] = [];
+  for (let code = 68; code <= 90; code++) { // D..Z
+    const letter = String.fromCharCode(code);
+    try {
+      if (fs.existsSync(`${letter}:\\`)) {
+        letters.push(letter);
+      }
+    } catch {
+      // Ignore unready drive
+    }
+  }
+  return letters.join(',');
+}
+
 /**
- * Background watcher to keep UI informed about USB status
+ * Background watcher to keep UI informed about USB status without periodic PowerShell spawning
  */
 export function startUsbWatcher(intervalMs: number = 10000) {
+  stopUsbWatcher();
+
   const check = async () => {
     if (currentStatus.status === 'BACKING_UP') return;
+    const sig = getMountedDrivesSignature();
+    if (sig === lastMountedDrivesSignature) {
+      return;
+    }
+    lastMountedDrivesSignature = sig;
+
     const usb = await detectUsbDrive();
     if (usb && currentStatus.status !== 'USB_CONNECTED') {
       updateStatus({
@@ -150,8 +179,17 @@ export function startUsbWatcher(intervalMs: number = 10000) {
   };
 
   // Initial check
-  check();
-  setInterval(check, intervalMs);
+  void check();
+  usbWatcherTimer = setInterval(() => {
+    void check();
+  }, intervalMs);
+}
+
+export function stopUsbWatcher() {
+  if (usbWatcherTimer) {
+    clearInterval(usbWatcherTimer);
+    usbWatcherTimer = null;
+  }
 }
 
 export function getCurrentBackupStatus(): BackupStatus {

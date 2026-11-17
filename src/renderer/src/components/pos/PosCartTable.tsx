@@ -1,5 +1,5 @@
 import React from 'react';
-import { CreateSaleItemPayload, Item } from '../../../shared/types';
+import { CreateSaleItemPayload, Item } from '../../../../shared/types';
 import { Trash2, Sparkles, Plus, Minus, AlertTriangle, ShieldAlert, Baby } from 'lucide-react';
 
 interface CartItem extends CreateSaleItemPayload {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { SalesInvoice, SalesInvoiceItem, ReturnItemPayload, ReturnSaleInvoiceResult } from '../../../shared/types';
+import { SalesInvoice, SalesInvoiceItem, ReturnItemPayload, ReturnSaleInvoiceResult } from '../../../../shared/types';
 import { RotateCcw, Search, X, Check, AlertTriangle, ArrowRight } from 'lucide-react';
 import { playBeepSuccess, playCheckoutChime, playWarningTone } from './soundEffects';
 
@@ -31,6 +31,19 @@ export const QuickReturnModal: React.FC<QuickReturnModalProps> = ({ isOpen, onCl
       setError(null);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -125,6 +138,7 @@ export const QuickReturnModal: React.FC<QuickReturnModalProps> = ({ isOpen, onCl
 
     try {
       const payloadItems: ReturnItemPayload[] = selectedItems.map(si => ({
+        invoice_item_id: si.item.id,
         item_id: si.item.item_id,
         item_name: si.item.item_name,
         quantity: si.returnQty,
@@ -151,7 +165,7 @@ export const QuickReturnModal: React.FC<QuickReturnModalProps> = ({ isOpen, onCl
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto font-sans">
+    <div data-modal-open="true" className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto font-sans">
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-150">
         
         {/* Header */}

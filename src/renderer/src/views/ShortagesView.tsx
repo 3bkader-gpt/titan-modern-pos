@@ -120,7 +120,7 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
       setSearchingItem(true);
       try {
         if (window.electronAPI) {
-          const res = await window.electronAPI.searchItems(itemSearchText.trim(), 8);
+          const res = await window.electronAPI.searchItems(itemSearchText.trim(), false, 8);
           setSearchResults(res || []);
         }
       } catch (err) {
@@ -181,7 +181,7 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
         const res = await window.electronAPI.clearCompletedShortages();
         await loadData();
         setToastMessage({
-          text: `تم تنظيف ${res.cleared} صنفاً متوفراً بالمخزن من كشكول النواقص`,
+          text: `تم تنظيف ${res.clearedCount} صنفاً متوفراً بالمخزن من كشكول النواقص`,
           type: 'success'
         });
       }
@@ -232,7 +232,7 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
       .filter((s) => selectedShortageIds.has(s.shortage_id))
       .map((s) => ({
         item_id: s.item_id,
-        item_name_en: s.item_name_en,
+        item_name_en: s.item_name,
         item_name_ar: s.item_name_ar,
         quantity: s.quantity || 1,
         consumer_price: s.consumer_price || 0,
@@ -525,7 +525,7 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
                       <td className="py-2 px-3">
                         <div className="flex flex-col">
                           <span className="font-bold text-slate-900">
-                            {shortage.item_name_en}
+                            {shortage.item_name}
                           </span>
                           {shortage.item_name_ar && (
                             <span className="text-[11px] text-slate-500 font-sans">

@@ -31,7 +31,9 @@ import {
   StagnantItem,
   UserAccount,
   AuditLogs,
-  LedgerIntegrityStatus
+  LedgerIntegrityStatus,
+  StorageInfo,
+  ChangeDataDirResult
 } from '../shared/types';
 
 export const electronAPI = {
@@ -68,7 +70,7 @@ export const electronAPI = {
   addCustomer: (name: string, phone?: string, address?: string): Promise<Customer> =>
     ipcRenderer.invoke('pos:addCustomer', name, phone, address),
 
-  getInvoiceForReturn: (invoiceNumber: number): Promise<{ invoice: SalesInvoice; items: SalesInvoiceItem[] } | null> =>
+  getInvoiceForReturn: (invoiceNumber: number): Promise<{ invoice: SalesInvoice; items: SalesInvoiceItem[]; is_fully_returned?: boolean } | null> =>
     ipcRenderer.invoke('pos:getInvoiceForReturn', invoiceNumber),
 
   // Phase 3 Inventory APIs
@@ -172,7 +174,20 @@ export const electronAPI = {
     return () => {
       ipcRenderer.removeListener('backup:statusChanged', subscription);
     };
-  }
+  },
+
+  // Data Storage Configuration APIs
+  getStorageInfo: (): Promise<StorageInfo> =>
+    ipcRenderer.invoke('storage:getInfo'),
+
+  chooseDataDirectory: (): Promise<ChangeDataDirResult> =>
+    ipcRenderer.invoke('storage:chooseDirectory'),
+
+  confirmCurrentDataDirectory: (): Promise<StorageInfo> =>
+    ipcRenderer.invoke('storage:confirmCurrent'),
+
+  openDataDirectory: (): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('storage:openInExplorer')
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

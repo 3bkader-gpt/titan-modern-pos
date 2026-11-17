@@ -133,6 +133,7 @@ export interface CreateSaleInvoiceResult {
 }
 
 export interface ReturnItemPayload {
+  invoice_item_id?: number;
   item_id: number;
   item_name: string;
   quantity: number;
@@ -489,4 +490,21 @@ export interface LedgerIntegrityStatus {
   message: string;
 }
 
+export interface StorageInfo {
+  activeDbPath: string;
+  dataDir: string;
+  backupsDir: string;
+  dbSizeMB: number;
+  isCustomConfigured: boolean;
+}
+
+export interface ChangeDataDirResult {
+  success: boolean;
+  canceled?: boolean;
+  activeDbPath?: string;
+  dataDir?: string;
+  backupsDir?: string;
+  mode?: 'migrated' | 'attached_existing' | 'confirmed_current';
+  message?: string;
+}
 

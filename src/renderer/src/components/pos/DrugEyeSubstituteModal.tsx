@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Item } from '../../../shared/types';
+import { Item } from '../../../../shared/types';
 import { Sparkles, X, Check, ArrowRightLeft, AlertCircle, PackageCheck } from 'lucide-react';
 import { playBeepSuccess } from './soundEffects';
 

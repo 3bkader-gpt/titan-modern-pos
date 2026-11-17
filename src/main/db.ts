@@ -39,6 +39,7 @@ import {
 } from '../shared/types';
 
 let db: Database.Database | null = null;
+let activeDbFilePath: string | null = null;
 
 export function getLocalDateTime(d: Date = new Date()): { date: string; time: string; timestamp: string; year: number } {
   const year = d.getFullYear();
@@ -212,16 +213,27 @@ function ensureSchemaUpgrades(database: Database.Database) {
 }
 
 export function initDatabase(dbPath?: string): Database.Database {
-  if (db) return db;
+  if (db) {
+    if (
+      dbPath &&
+      activeDbFilePath &&
+      path.resolve(dbPath).toLowerCase() !== path.resolve(activeDbFilePath).toLowerCase()
+    ) {
+      closeDatabase();
+    } else {
+      return db;
+    }
+  }
 
   let targetPath = dbPath;
   if (!targetPath) {
     const candidatePaths = [
+      process.env.PORTABLE_EXECUTABLE_DIR ? path.resolve(process.env.PORTABLE_EXECUTABLE_DIR, 'data', 'pharmacy.sqlite') : '',
       path.resolve(process.cwd(), 'data', 'pharmacy.sqlite'),
       path.resolve(path.dirname(process.execPath), 'data', 'pharmacy.sqlite'),
       path.resolve(process.resourcesPath || '', 'data', 'pharmacy.sqlite'),
       path.resolve(typeof __dirname !== 'undefined' ? __dirname : process.cwd(), '..', 'data', 'pharmacy.sqlite')
-    ];
+    ].filter(Boolean);
     for (const cand of candidatePaths) {
       if (cand && fs.existsSync(cand)) {
         targetPath = cand;
@@ -237,6 +249,7 @@ export function initDatabase(dbPath?: string): Database.Database {
   }
 
   db = new Database(finalPath);
+  activeDbFilePath = finalPath;
 
   // 1. Ultra high-performance PRAGMAs
   db.pragma('journal_mode = WAL');
@@ -303,6 +316,32 @@ export function getDatabaseInstance(): Database.Database {
     return initDatabase();
   }
   return db;
+}
+
+export function getActiveDatabasePath(): string | null {
+  return activeDbFilePath;
+}
+
+export function closeDatabase(): void {
+  if (db) {
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // Ignore if busy or read-only
+    }
+    try {
+      db.close();
+    } catch {
+      // Ignore close errors
+    }
+    db = null;
+    activeDbFilePath = null;
+  }
+}
+
+export function switchDatabase(newDbPath: string): Database.Database {
+  closeDatabase();
+  return initDatabase(newDbPath);
 }
 
 /**
@@ -439,6 +478,7 @@ function searchByFts(rawQuery: string, filterInStockOnly: boolean, limit: number
   }
 
   // Fallback to LIKE if FTS produced 0 results
+  const pattern = `%${rawQuery.trim()}%`;
   const likeParams: (string | number)[] = [pattern, pattern, pattern, pattern];
   let likeExcludeClause = '';
   if (excludeId !== undefined) {
@@ -967,6 +1007,7 @@ export function returnSaleInvoice(invoiceNumber: number, itemsToReturn?: ReturnI
       items = originalItems
         .filter(i => (i.quantity - (i.returned_quantity || 0)) > 0.0001)
         .map(i => ({
+          invoice_item_id: i.id,
           item_id: i.item_id,
           item_name: i.item_name,
           quantity: Math.round((i.quantity - (i.returned_quantity || 0)) * 10000) / 10000,
@@ -980,13 +1021,28 @@ export function returnSaleInvoice(invoiceNumber: number, itemsToReturn?: ReturnI
       throw new Error(`تم إرجاع جميع بنود الفاتورة رقم #${invoiceNumber} بالكامل مسبقاً.`);
     }
 
-    // 1. Strict validation: prevent returning items not on invoice or exceeding sold/remaining quantities
+    // 1. Strict validation: match exact invoice line (supporting same item_id on multiple lines)
+    // and prevent exceeding sold/remaining quantities
+    const matchedLineIds = new Set<number>();
+    const resolvedReturnRows: Array<{ item: ReturnItemPayload; orig: any }> = [];
+
     for (const item of items) {
       if (item.quantity <= 0) {
         throw new Error(`الكمية المراد إرجاعها للصنف "${item.item_name}" يجب أن تكون أكبر من الصفر.`);
       }
 
-      const orig = originalItems.find(o => o.item_id === item.item_id);
+      let orig = item.invoice_item_id
+        ? originalItems.find(o => o.id === item.invoice_item_id)
+        : undefined;
+
+      if (!orig) {
+        orig = originalItems.find(
+          o => o.item_id === item.item_id && !matchedLineIds.has(o.id) && (o.quantity - (o.returned_quantity || 0)) > 0.0001
+        ) || originalItems.find(
+          o => o.item_id === item.item_id && !matchedLineIds.has(o.id)
+        ) || originalItems.find(o => o.item_id === item.item_id);
+      }
+
       if (!orig) {
         throw new Error(`الصنف "${item.item_name}" (كود: ${item.item_id}) غير موجود في الفاتورة الأصلية رقم #${invoiceNumber}.`);
       }
@@ -996,6 +1052,9 @@ export function returnSaleInvoice(invoiceNumber: number, itemsToReturn?: ReturnI
       if (item.quantity > remaining + 0.0001) {
         throw new Error(`الكمية المراد إرجاعها (${item.quantity}) تتجاوز الكمية المتبقية القابلة للإرجاع (${remaining}) للصنف "${item.item_name}".`);
       }
+
+      matchedLineIds.add(orig.id);
+      resolvedReturnRows.push({ item, orig });
     }
 
     // 2. Prepare database statements
@@ -1031,8 +1090,7 @@ export function returnSaleInvoice(invoiceNumber: number, itemsToReturn?: ReturnI
     const paymentMethod = invoice.payment_method || 'نقدي';
 
     // 3. Process each item refund & stock restoration
-    for (const item of items) {
-      const orig = originalItems.find(o => o.item_id === item.item_id)!;
+    for (const { item, orig } of resolvedReturnRows) {
       const dbItem = getItemPkgUnitsStmt.get(item.item_id) as { package_units: number } | undefined;
       const pkgUnits = (orig.unit_type === 'شريط' || item.unit_type === 'unit')
         ? (dbItem?.package_units && dbItem.package_units > 1 ? dbItem.package_units : (orig.package_units || 1))

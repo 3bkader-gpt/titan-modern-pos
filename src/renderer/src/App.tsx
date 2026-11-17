@@ -9,7 +9,8 @@ import { ShortagesView } from './views/ShortagesView';
 import { TreasuryShiftsView } from './views/TreasuryShiftsView';
 import { ReportsAnalyticsView } from './views/ReportsAnalyticsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { DashboardStats, BackupStatus } from '../../shared/types';
+import { DataLocationModal } from './components/DataLocationModal';
+import { DashboardStats, BackupStatus, StorageInfo } from '../../shared/types';
 import { CheckCircle2, AlertCircle, X } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -18,6 +19,9 @@ export const App: React.FC = () => {
   const [loadingStats, setLoadingStats] = useState<boolean>(true);
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
   const [isBackingUp, setIsBackingUp] = useState<boolean>(false);
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
+  const [isStorageModalOpen, setIsStorageModalOpen] = useState<boolean>(false);
+  const [isFirstRunStorageSetup, setIsFirstRunStorageSetup] = useState<boolean>(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
   // Cross-screen draft bridge (from F4 Shortages to F3 Purchases)
@@ -63,6 +67,32 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const loadStorageInfo = useCallback(async (openIfUnconfigured: boolean = false) => {
+    try {
+      if (window.electronAPI?.getStorageInfo) {
+        const info = await window.electronAPI.getStorageInfo();
+        setStorageInfo(info);
+        if (openIfUnconfigured && !info.isCustomConfigured) {
+          setIsFirstRunStorageSetup(true);
+          setIsStorageModalOpen(true);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load storage info:', err);
+    }
+  }, []);
+
+  const handleStorageUpdated = async (updatedInfo: StorageInfo, message?: string) => {
+    setStorageInfo(updatedInfo);
+    setIsFirstRunStorageSetup(false);
+    await loadStats();
+    await loadBackupStatus();
+    window.dispatchEvent(new Event('refresh-app-stats'));
+    if (message) {
+      showToast(message, 'success');
+    }
+  };
+
   const handleTriggerBackup = async () => {
     if (isBackingUp) return;
     setIsBackingUp(true);
@@ -107,6 +137,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     loadStats();
     loadBackupStatus();
+    loadStorageInfo(true);
 
     let unsubscribe: (() => void) | undefined;
     if (window.electronAPI?.onBackupStatusChange) {
@@ -121,7 +152,7 @@ export const App: React.FC = () => {
       if (unsubscribe) unsubscribe();
       window.removeEventListener('refresh-app-stats', loadStats);
     };
-  }, [loadStats, loadBackupStatus]);
+  }, [loadStats, loadBackupStatus, loadStorageInfo]);
 
   // Global Keyboard Navigation (F1, F3-F7 & Esc)
   useEffect(() => {
@@ -156,9 +187,16 @@ export const App: React.FC = () => {
         case 'F7':
           setActiveTab('catalog');
           break;
-        case 'Escape':
-          setActiveTab('dashboard');
+        case 'Escape': {
+          if (e.defaultPrevented) break;
+          if (document.querySelector('[data-modal-open="true"]') || document.querySelector('.fixed.inset-0.z-50')) break;
+          const target = e.target as HTMLElement | null;
+          if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) break;
+          if (activeTab !== 'pos' && activeTab !== 'dashboard') {
+            setActiveTab('pos');
+          }
           break;
+        }
       }
     };
 
@@ -172,7 +210,13 @@ export const App: React.FC = () => {
       <Header
         stats={stats}
         backupStatus={backupStatus}
+        storageInfo={storageInfo}
         onTriggerBackup={handleTriggerBackup}
+        onOpenStorageModal={() => {
+          setIsFirstRunStorageSetup(false);
+          void loadStorageInfo(false);
+          setIsStorageModalOpen(true);
+        }}
         isBackingUp={isBackingUp}
       />
 
@@ -218,6 +262,15 @@ export const App: React.FC = () => {
           </div>
         </main>
       </div>
+
+      {/* Data Storage Location Modal */}
+      <DataLocationModal
+        isOpen={isStorageModalOpen}
+        isFirstRunSetup={isFirstRunStorageSetup}
+        storageInfo={storageInfo}
+        onClose={() => setIsStorageModalOpen(false)}
+        onUpdated={handleStorageUpdated}
+      />
 
       {/* Toast Notification */}
       {toast && (

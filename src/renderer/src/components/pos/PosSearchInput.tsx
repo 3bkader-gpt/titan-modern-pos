@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Item } from '../../../shared/types';
+import { Item } from '../../../../shared/types';
 import { Search, Barcode, Sparkles, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { playBeepSuccess, playWarningTone } from './soundEffects';
 

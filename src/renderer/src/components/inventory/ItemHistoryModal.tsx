@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ItemFullHistory } from '../../../shared/types';
+import { ItemFullHistory } from '../../../../shared/types';
 import { History, X, ShoppingCart, Truck, TrendingUp, Calendar, Clock, DollarSign } from 'lucide-react';
 
 interface ItemHistoryModalProps {

@@ -202,7 +202,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       setSearching(true);
       try {
         if (window.electronAPI) {
-          const res = await window.electronAPI.searchItems(itemSearchQuery.trim(), 12);
+          const res = await window.electronAPI.searchItems(itemSearchQuery.trim(), false, 12);
           setSearchResults(res || []);
           setShowDropdown(true);
         }
@@ -326,29 +326,38 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     setStatusMessage(null);
 
     try {
+      const selectedSupplier = suppliers.find(
+        (s) => s.supplier_id === Number(selectedSupplierId)
+      );
+
       const payload: CreatePurchaseInvoicePayload = {
         supplier_id: Number(selectedSupplierId),
+        supplier_name: selectedSupplier?.supplier_name || 'مورد عام',
         paper_invoice_number: paperInvoiceNumber.trim() || undefined,
         invoice_date: invoiceDate,
-        payment_method: paymentMethod,
+        payment_method: paymentMethod === 'CASH' ? 'نقدي' : 'آجل',
         notes: invoiceNotes.trim() || undefined,
         items: draftLines.map((line) => ({
           item_id: line.item_id,
+          item_name: line.item_name_en,
           quantity: line.quantity,
           bonus_quantity: line.bonus_quantity || 0,
           consumer_price: line.consumer_price,
           buy_price: line.buy_price,
           discount_pct: line.discount_pct || 0,
-          expiry_date: line.expiry_date.trim() || undefined
+          expiry_date: line.expiry_date.trim() || undefined,
+          line_total: line.line_total
         }))
       };
 
       if (window.electronAPI) {
         const res = await window.electronAPI.createPurchaseInvoice(payload);
         setStatusMessage({
-          text: `تم استلام الفاتورة رقم #${res.invoice_id} بنجاح! تم تحديث رصيد ${res.items_updated} صنفاً، وتنظيف النواقص الموردة، وتسجيل القيد المالي (${res.total_amount.toFixed(2)} ج.م).`,
+          text: `تم استلام الفاتورة رقم #${res.purchase_invoice_id} بنجاح! تم تحديث رصيد ${res.item_count} صنفاً، وتنظيف النواقص الموردة، وتسجيل القيد المالي (${res.total_amount.toFixed(2)} ج.م).`,
           type: 'success'
         });
+
+        window.dispatchEvent(new Event('refresh-app-stats'));
 
         // Reset form
         setDraftLines([]);
@@ -368,7 +377,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     setLoadingDetails(true);
     try {
       if (window.electronAPI) {
-        const items = await window.electronAPI.getPurchaseInvoiceItems(invoice.invoice_id);
+        const items = await window.electronAPI.getPurchaseInvoiceItems(invoice.purchase_invoice_id);
         setSelectedInvoiceDetails({ invoice, items: items || [] });
       }
     } catch (err) {
@@ -388,8 +397,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       if (window.electronAPI) {
         const saved = await window.electronAPI.saveSupplier({
           supplier_name: newSupplierName.trim(),
-          phone: newSupplierPhone.trim() || undefined,
-          address: newSupplierAddress.trim() || undefined
+          contact_phone: newSupplierPhone.trim() || undefined
         });
 
         await loadSuppliers();
@@ -531,7 +539,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                   >
                     {suppliers.map((s) => (
                       <option key={s.supplier_id} value={s.supplier_id}>
-                        {s.supplier_name} {s.phone ? `(${s.phone})` : ''}
+                        {s.supplier_name} {s.contact_phone ? `(${s.contact_phone})` : ''}
                       </option>
                     ))}
                   </select>
@@ -966,9 +974,9 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                   </tr>
                 ) : (
                   invoicesHistory.map((inv) => (
-                    <tr key={inv.invoice_id} className="hover:bg-slate-50 transition-colors">
+                    <tr key={inv.purchase_invoice_id} className="hover:bg-slate-50 transition-colors">
                       <td className="py-2 px-3 text-center font-mono font-bold text-blue-700">
-                        #{inv.invoice_id}
+                        #{inv.purchase_invoice_id}
                       </td>
                       <td className="py-2 px-3 font-mono text-slate-600">
                         {inv.paper_invoice_number || '-'}
@@ -981,15 +989,15 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                       </td>
                       <td className="py-2 px-3 text-center">
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                          inv.payment_method === 'CASH'
+                          (inv.payment_method === 'نقدي' || inv.payment_method === 'CASH')
                             ? 'bg-emerald-100 text-emerald-800'
                             : 'bg-blue-100 text-blue-800'
                         }`}>
-                          {inv.payment_method === 'CASH' ? 'نقدي' : 'آجل'}
+                          {(inv.payment_method === 'نقدي' || inv.payment_method === 'CASH') ? 'نقدي' : 'آجل'}
                         </span>
                       </td>
                       <td className="py-2 px-3 text-center font-mono text-slate-600">
-                        {inv.items_count || 1}
+                        {inv.item_count || 1}
                       </td>
                       <td className="py-2 px-3 text-left font-mono font-bold text-slate-900">
                         {inv.total_amount.toFixed(2)} ج.م
@@ -1047,14 +1055,11 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                   </div>
 
                   <h3 className="text-sm font-bold text-slate-900 mb-1">{s.supplier_name}</h3>
-                  {s.phone && (
+                  {s.contact_phone && (
                     <p className="text-xs text-slate-500 flex items-center gap-1.5 mb-1 font-mono">
                       <Phone className="w-3 h-3 text-slate-400" />
-                      <span>{s.phone}</span>
+                      <span>{s.contact_phone}</span>
                     </p>
-                  )}
-                  {s.address && (
-                    <p className="text-xs text-slate-500 line-clamp-1">{s.address}</p>
                   )}
                 </div>
 
@@ -1079,7 +1084,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                 <Truck className="w-5 h-5 text-blue-600" />
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
-                    تفاصيل فاتورة التوريد #{selectedInvoiceDetails.invoice.invoice_id}
+                    تفاصيل فاتورة التوريد #{selectedInvoiceDetails.invoice.purchase_invoice_id}
                   </h3>
                   <span className="text-xs text-slate-500">
                     المورد: {selectedInvoiceDetails.invoice.supplier_name} • التاريخ: {selectedInvoiceDetails.invoice.invoice_date}
@@ -1110,7 +1115,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                   {selectedInvoiceDetails.items.map((item, idx) => (
                     <tr key={idx}>
                       <td className="py-2 px-3 font-bold text-slate-900">
-                        {item.item_name_en}
+                        {item.item_name}
                       </td>
                       <td className="py-2 px-3 text-center font-mono">{item.quantity}</td>
                       <td className="py-2 px-3 text-center font-mono text-emerald-600">
@@ -1123,7 +1128,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                         {item.expiry_date || '-'}
                       </td>
                       <td className="py-2 px-3 text-left font-mono font-bold text-slate-900">
-                        {item.total_price.toFixed(2)} ج.م
+                        {item.line_total.toFixed(2)} ج.م
                       </td>
                     </tr>
                   ))}
