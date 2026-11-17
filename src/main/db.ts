@@ -398,9 +398,57 @@ export function checkLedgerIntegrity(database?: Database.Database): LedgerIntegr
 /**
  * High-speed search (sub-5ms) for items
  */
+function normalizeArabicDigits(input: string): string {
+  return input
+    .replace(/[\u0660-\u0669]/g, ch => String(ch.charCodeAt(0) - 0x0660))
+    .replace(/[\u06F0-\u06F9]/g, ch => String(ch.charCodeAt(0) - 0x06F0));
+}
+
+function extractBarcodeCandidates(raw: string): string[] {
+  const normalized = normalizeArabicDigits(raw)
+    .replace(/^](d2|C1|E0|Q3|e0|c1)/i, '')
+    .replace(/[\x00-\x1F\x7F]/g, '')
+    .trim();
+
+  if (!normalized) return [];
+
+  const candidates = new Set<string>();
+  candidates.add(normalized);
+
+  const addGtinVariants = (gtin: string) => {
+    candidates.add(gtin);
+    if (gtin.length === 14 && gtin.startsWith('0')) {
+      candidates.add(gtin.slice(1));
+    }
+    const stripped = gtin.replace(/^0+/, '');
+    if (stripped.length >= 6) {
+      candidates.add(stripped);
+    }
+  };
+
+  // GS1 DataMatrix with parentheses: (01)06222010611333...
+  const parenMatch = normalized.match(/\(01\)(\d{14})/);
+  if (parenMatch) {
+    addGtinVariants(parenMatch[1]);
+  }
+
+  // Raw GS1 DataMatrix without parentheses: 01062220106113331728090010...
+  const rawGs1Match = normalized.match(/^01(\d{14})(?:17\d{6}|10|21|$)/);
+  if (rawGs1Match) {
+    addGtinVariants(rawGs1Match[1]);
+  }
+
+  // Pure numeric GTIN-14 / EAN-13 / UPC with possible leading zeros
+  if (/^\d{8,14}$/.test(normalized)) {
+    addGtinVariants(normalized);
+  }
+
+  return Array.from(candidates);
+}
+
 export function searchItems(query: string, filterInStockOnly: boolean = false, limit: number = 50): Item[] {
   const database = getDatabaseInstance();
-  const trimmed = query.trim();
+  const trimmed = normalizeArabicDigits(query).trim();
 
   // If no query, return top items
   if (!trimmed) {
@@ -413,14 +461,17 @@ export function searchItems(query: string, filterInStockOnly: boolean = false, l
     return database.prepare(sql).all(limit) as Item[];
   }
 
-  // 1. Direct barcode exact match check (instant index lookup)
-  const barcodeMatch = database.prepare('SELECT * FROM items WHERE barcode = ? LIMIT 1').get(trimmed) as Item | undefined;
-  if (barcodeMatch) {
-    const list = [barcodeMatch];
-    if (filterInStockOnly && barcodeMatch.current_stock <= 0) {
-      // still return or filter
-    } else {
-      return list;
+  // 1. Direct barcode & GS1 DataMatrix / GTIN-14 exact match check (instant index lookup)
+  const barcodeCandidates = extractBarcodeCandidates(query);
+  if (barcodeCandidates.length > 0) {
+    const placeholders = barcodeCandidates.map(() => '?').join(', ');
+    const barcodeMatch = database
+      .prepare(`SELECT * FROM items WHERE barcode IN (${placeholders}) LIMIT 1`)
+      .get(...barcodeCandidates) as Item | undefined;
+    if (barcodeMatch) {
+      if (!filterInStockOnly || barcodeMatch.current_stock > 0) {
+        return [barcodeMatch];
+      }
     }
   }
 

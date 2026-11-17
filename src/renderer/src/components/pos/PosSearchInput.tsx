@@ -6,9 +6,22 @@ import { playBeepSuccess, playWarningTone } from './soundEffects';
 interface PosSearchInputProps {
   onAddItem: (item: Item, unitType?: 'pack' | 'unit') => void;
   onOpenDrugEye: (item: Item) => void;
+  disabledGlobalCapture?: boolean;
+  hasCartItems?: boolean;
+  onArrowAdjust?: (delta: 1 | -1) => void;
+  onToggleLastUnit?: () => void;
+  onDeleteLastItem?: () => void;
 }
 
-export const PosSearchInput: React.FC<PosSearchInputProps> = ({ onAddItem, onOpenDrugEye }) => {
+export const PosSearchInput: React.FC<PosSearchInputProps> = ({
+  onAddItem,
+  onOpenDrugEye,
+  disabledGlobalCapture = false,
+  hasCartItems = false,
+  onArrowAdjust,
+  onToggleLastUnit,
+  onDeleteLastItem
+}) => {
   const [query, setQuery] = useState<string>('');
   const [results, setResults] = useState<Item[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
@@ -18,37 +31,18 @@ export const PosSearchInput: React.FC<PosSearchInputProps> = ({ onAddItem, onOpe
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
+  const latestValueRef = useRef<string>('');
+  const lastSearchedQueryRef = useRef<string>('');
 
   // Auto-focus input on mount
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
-  // Listen to F2 shortcut or focus-pos-search event to refocus search
-  useEffect(() => {
-    const handleRefocus = () => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    };
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'F2') {
-        e.preventDefault();
-        handleRefocus();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('focus-pos-search', handleRefocus);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('focus-pos-search', handleRefocus);
-    };
-  }, []);
-
   const performSearch = useCallback(async (searchQuery: string) => {
     const trimmed = searchQuery.trim();
     if (!trimmed) {
+      lastSearchedQueryRef.current = '';
       setResults([]);
       setIsOpen(false);
       return;
@@ -58,6 +52,11 @@ export const PosSearchInput: React.FC<PosSearchInputProps> = ({ onAddItem, onOpe
     try {
       if (window.electronAPI) {
         const items = await window.electronAPI.searchItems(trimmed, false, 30);
+        // Ignore stale responses if the user already cleared/submitted the input
+        if (latestValueRef.current.trim() !== trimmed) {
+          return;
+        }
+        lastSearchedQueryRef.current = trimmed;
         setResults(items || []);
         setSelectedIndex(0);
         setIsOpen(true);
@@ -70,8 +69,127 @@ export const PosSearchInput: React.FC<PosSearchInputProps> = ({ onAddItem, onOpe
     }
   }, []);
 
+  const handleSelect = useCallback((item: Item) => {
+    if (debounceTimer.current) {
+      clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+    latestValueRef.current = '';
+    lastSearchedQueryRef.current = '';
+    playBeepSuccess();
+    onAddItem(item, 'pack');
+    setQuery('');
+    setResults([]);
+    setIsOpen(false);
+    inputRef.current?.focus();
+  }, [onAddItem]);
+
+  const submitDirectScan = useCallback((rawVal: string) => {
+    const trimmed = rawVal.trim();
+    if (!trimmed) return;
+    if (debounceTimer.current) {
+      clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+    if (window.electronAPI) {
+      window.electronAPI.searchItems(trimmed, false, 1).then(found => {
+        if (found && found.length > 0) {
+          handleSelect(found[0]);
+        } else {
+          playWarningTone();
+        }
+      });
+    }
+  }, [handleSelect]);
+
+  // Listen to F2 shortcut, focus-pos-search event, AND global USB barcode scanner auto-capture
+  useEffect(() => {
+    const handleRefocus = () => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    };
+
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        handleRefocus();
+        return;
+      }
+
+      if (disabledGlobalCapture) return;
+      if (!inputRef.current || inputRef.current.offsetParent === null) return;
+
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (activeEl === inputRef.current) return;
+
+      // Never steal keystrokes from another input/textarea/select or an open modal dialog
+      if (
+        activeEl &&
+        (activeEl.tagName === 'INPUT' ||
+          activeEl.tagName === 'TEXTAREA' ||
+          activeEl.tagName === 'SELECT' ||
+          activeEl.isContentEditable)
+      ) {
+        return;
+      }
+      if (document.querySelector('[role="dialog"], .fixed.inset-0')) {
+        return;
+      }
+
+      // If Enter arrives right after a redirected scan burst, submit immediately
+      if (e.key === 'Enter' && latestValueRef.current.trim()) {
+        e.preventDefault();
+        submitDirectScan(latestValueRef.current);
+        return;
+      }
+
+      // Allow instant arrow adjustment on last scanned item even if focus slipped off the search bar
+      if (!latestValueRef.current.trim() && hasCartItems) {
+        if (e.key === 'ArrowUp' && onArrowAdjust) {
+          e.preventDefault();
+          onArrowAdjust(1);
+          return;
+        }
+        if (e.key === 'ArrowDown' && onArrowAdjust) {
+          e.preventDefault();
+          onArrowAdjust(-1);
+          return;
+        }
+        if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && onToggleLastUnit) {
+          e.preventDefault();
+          onToggleLastUnit();
+          return;
+        }
+      }
+
+      // Redirect first printable barcode/search keystroke directly into POS search bar without losing a single character
+      if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        const nextVal = latestValueRef.current + e.key;
+        latestValueRef.current = nextVal;
+        setQuery(nextVal);
+        inputRef.current?.focus();
+
+        if (debounceTimer.current) {
+          clearTimeout(debounceTimer.current);
+        }
+        debounceTimer.current = setTimeout(() => {
+          performSearch(nextVal);
+        }, 120);
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown, true);
+    window.addEventListener('focus-pos-search', handleRefocus);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown, true);
+      window.removeEventListener('focus-pos-search', handleRefocus);
+    };
+  }, [disabledGlobalCapture, hasCartItems, onArrowAdjust, onToggleLastUnit, performSearch, submitDirectScan]);
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
+    latestValueRef.current = val;
     setQuery(val);
 
     if (debounceTimer.current) {
@@ -79,6 +197,7 @@ export const PosSearchInput: React.FC<PosSearchInputProps> = ({ onAddItem, onOpe
     }
 
     if (!val.trim()) {
+      lastSearchedQueryRef.current = '';
       setResults([]);
       setIsOpen(false);
       return;
@@ -90,42 +209,39 @@ export const PosSearchInput: React.FC<PosSearchInputProps> = ({ onAddItem, onOpe
     }, 120);
   };
 
-  const handleSelect = (item: Item) => {
-    playBeepSuccess();
-    onAddItem(item, 'pack');
-    setQuery('');
-    setResults([]);
-    setIsOpen(false);
-    inputRef.current?.focus();
-  };
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     // 1. Enter key: Barcode instant submit or dropdown selection
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (isOpen && results.length > 0 && selectedIndex >= 0 && selectedIndex < results.length) {
+      if (debounceTimer.current) {
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = null;
+      }
+      const currentVal = (e.currentTarget.value || latestValueRef.current).trim();
+      if (
+        isOpen &&
+        results.length > 0 &&
+        selectedIndex >= 0 &&
+        selectedIndex < results.length &&
+        lastSearchedQueryRef.current === currentVal
+      ) {
         handleSelect(results[selectedIndex]);
-      } else if (query.trim()) {
-        // Direct barcode exact search & add
-        if (window.electronAPI) {
-          window.electronAPI.searchItems(query.trim(), false, 1).then(found => {
-            if (found && found.length > 0) {
-              handleSelect(found[0]);
-            } else {
-              playWarningTone();
-            }
-          });
-        }
+      } else if (currentVal) {
+        submitDirectScan(currentVal);
       }
       return;
     }
 
-    // 2. Arrow Navigation
+    // 2. Arrow Navigation (Dropdown when open; Instant Strip/Pack adjust on last scanned item when search is empty)
     if (e.key === 'ArrowDown') {
       e.preventDefault();
+      if (!query.trim() && !isOpen && hasCartItems && onArrowAdjust) {
+        onArrowAdjust(-1);
+        return;
+      }
       if (!isOpen && results.length > 0) {
         setIsOpen(true);
-      } else {
+      } else if (results.length > 0) {
         setSelectedIndex(prev => (prev + 1 < results.length ? prev + 1 : 0));
       }
       return;
@@ -133,7 +249,25 @@ export const PosSearchInput: React.FC<PosSearchInputProps> = ({ onAddItem, onOpe
 
     if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setSelectedIndex(prev => (prev - 1 >= 0 ? prev - 1 : results.length - 1));
+      if (!query.trim() && !isOpen && hasCartItems && onArrowAdjust) {
+        onArrowAdjust(1);
+        return;
+      }
+      if (results.length > 0) {
+        setSelectedIndex(prev => (prev - 1 >= 0 ? prev - 1 : results.length - 1));
+      }
+      return;
+    }
+
+    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !query.trim() && !isOpen && hasCartItems && onToggleLastUnit) {
+      e.preventDefault();
+      onToggleLastUnit();
+      return;
+    }
+
+    if (e.key === 'Delete' && !query.trim() && !isOpen && hasCartItems && onDeleteLastItem) {
+      e.preventDefault();
+      onDeleteLastItem();
       return;
     }
 

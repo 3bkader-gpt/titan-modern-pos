@@ -51,18 +51,19 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
   return (
     <div className="h-full flex flex-col bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden font-sans">
       {/* Table Header */}
-      <div className="grid grid-cols-12 px-4 py-3 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-700 select-none">
-        <div className="col-span-1 text-center font-mono">#</div>
-        <div className="col-span-4 text-right">الصنف والتحذيرات الطبية</div>
-        <div className="col-span-2 text-center">نوع الوحدة</div>
-        <div className="col-span-2 text-center">الكمية المطلوبة</div>
-        <div className="col-span-1 text-left font-mono">السعر</div>
-        <div className="col-span-1 text-left font-mono">خصم %</div>
-        <div className="col-span-1 text-left font-mono">الإجمالي</div>
+      <div className="grid grid-cols-[26px_minmax(0,1fr)_90px_104px_58px_48px_64px_54px] gap-2 px-3 py-2.5 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-700 select-none items-center">
+        <div className="text-center font-mono">#</div>
+        <div className="text-right truncate">الصنف والتحذيرات الطبية</div>
+        <div className="text-center">الوحدة</div>
+        <div className="text-center">الكمية</div>
+        <div className="text-left font-mono">السعر</div>
+        <div className="text-center font-mono">خصم%</div>
+        <div className="text-left font-mono">الإجمالي</div>
+        <div className="text-center">إجراء</div>
       </div>
 
       {/* Cart Items List */}
-      <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden divide-y divide-slate-100">
         {items.map((item, index) => {
           // Check stock limit (convert strips to equivalent packs if unit_type is unit)
           const packEquiv = (item.unit_type === 'unit' && item.package_units > 1)
@@ -75,17 +76,21 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
           return (
             <div
               key={`${item.item_id}-${index}`}
-              className={`grid grid-cols-12 px-4 py-3 items-center text-xs transition-colors ${
-                isOverStock ? 'bg-amber-50/40 hover:bg-amber-50/70' : 'hover:bg-slate-50/80'
+              className={`grid grid-cols-[26px_minmax(0,1fr)_90px_104px_58px_48px_64px_54px] gap-2 px-3 py-2.5 items-center text-xs transition-colors ${
+                index === 0
+                  ? 'bg-blue-50/45 border-r-4 border-r-blue-500 hover:bg-blue-50/70'
+                  : isOverStock
+                    ? 'bg-amber-50/40 hover:bg-amber-50/70'
+                    : 'hover:bg-slate-50/80'
               }`}
             >
               {/* 1. Line Number */}
-              <div className="col-span-1 text-center font-mono font-bold text-slate-400">
+              <div className="text-center font-mono font-bold text-slate-400">
                 {index + 1}
               </div>
 
               {/* 2. Drug Name & Clinical Badges */}
-              <div className="col-span-4 pr-1 min-w-0">
+              <div className="min-w-0">
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span className="font-bold text-slate-900 truncate text-xs" title={item.item_name}>
                     {item.item_name}
@@ -126,16 +131,16 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
               </div>
 
               {/* 3. Unit Toggle (Pack / Strip) */}
-              <div className="col-span-2 flex justify-center">
+              <div className="flex justify-center">
                 {hasMultipleUnits ? (
                   <button
                     type="button"
                     onClick={() => onToggleUnit(index)}
-                    className="flex items-center p-0.5 rounded-lg border border-slate-300 bg-slate-100 text-[11px] font-bold transition-all shadow-2xs hover:border-blue-400"
+                    className="flex items-center p-0.5 rounded-lg border border-slate-300 bg-slate-100 text-[11px] font-bold transition-all shadow-2xs hover:border-blue-400 whitespace-nowrap"
                     title={`التبديل بين عبوة كاملة أو شريط (${item.package_units} شريط بالعلبة)`}
                   >
                     <span
-                      className={`px-2 py-0.5 rounded-md transition-colors ${
+                      className={`px-1.5 py-0.5 rounded-md transition-colors ${
                         item.unit_type === 'pack'
                           ? 'bg-white text-blue-700 shadow-2xs'
                           : 'text-slate-500 hover:text-slate-800'
@@ -144,7 +149,7 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
                       عبوة
                     </span>
                     <span
-                      className={`px-2 py-0.5 rounded-md transition-colors ${
+                      className={`px-1.5 py-0.5 rounded-md transition-colors ${
                         item.unit_type === 'unit'
                           ? 'bg-blue-600 text-white shadow-2xs'
                           : 'text-slate-500 hover:text-slate-800'
@@ -154,20 +159,20 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
                     </span>
                   </button>
                 ) : (
-                  <span className="text-[11px] text-slate-500 px-2 py-0.5 rounded bg-slate-100">
+                  <span className="text-[11px] text-slate-500 px-2 py-0.5 rounded bg-slate-100 whitespace-nowrap">
                     عبوة كاملة
                   </span>
                 )}
               </div>
 
               {/* 4. Quantity Stepper */}
-              <div className="col-span-2 flex items-center justify-center gap-1.5">
+              <div className="flex items-center justify-center gap-1">
                 <button
                   type="button"
                   onClick={() => onUpdateQuantity(index, item.quantity - 1)}
-                  className="w-7 h-7 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 flex items-center justify-center text-slate-700 transition-colors"
+                  className="w-6 h-7 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 flex items-center justify-center text-slate-700 transition-colors shrink-0"
                 >
-                  <Minus className="w-3.5 h-3.5" />
+                  <Minus className="w-3 h-3" />
                 </button>
 
                 <input
@@ -176,25 +181,25 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
                   step="any"
                   value={item.quantity}
                   onChange={e => onUpdateQuantity(index, parseFloat(e.target.value) || 1)}
-                  className="w-14 px-1 py-1 text-center font-mono font-bold text-xs rounded-lg border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-200 outline-none"
+                  className="w-11 px-1 py-1 text-center font-mono font-bold text-xs rounded-lg border border-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-200 outline-none"
                 />
 
                 <button
                   type="button"
                   onClick={() => onUpdateQuantity(index, item.quantity + 1)}
-                  className="w-7 h-7 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 flex items-center justify-center text-slate-700 transition-colors"
+                  className="w-6 h-7 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 flex items-center justify-center text-slate-700 transition-colors shrink-0"
                 >
-                  <Plus className="w-3.5 h-3.5" />
+                  <Plus className="w-3 h-3" />
                 </button>
               </div>
 
               {/* 5. Unit Price */}
-              <div className="col-span-1 text-left font-mono font-bold text-slate-800">
+              <div className="text-left font-mono font-bold text-slate-800 truncate">
                 {item.unit_price.toFixed(2)}
               </div>
 
               {/* 6. Discount % Input */}
-              <div className="col-span-1 text-left">
+              <div className="flex justify-center">
                 <input
                   type="number"
                   min="0"
@@ -205,31 +210,30 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
                 />
               </div>
 
-              {/* 7. Subtotal & Quick Actions */}
-              <div className="col-span-1 flex items-center justify-between gap-1 text-left">
-                <span className="font-mono font-bold text-slate-900">
-                  {item.line_total.toFixed(2)}
-                </span>
+              {/* 7. Subtotal */}
+              <div className="text-left font-mono font-bold text-slate-900 truncate">
+                {item.line_total.toFixed(2)}
+              </div>
 
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => onOpenDrugEye(item)}
-                    title="بدائل المادة الفعالة (Alt+A)"
-                    className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                  </button>
+              {/* 8. Quick Actions (Always 100% Visible) */}
+              <div className="flex items-center justify-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => onOpenDrugEye(item)}
+                  title="بدائل المادة الفعالة (Alt+A)"
+                  className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                </button>
 
-                  <button
-                    type="button"
-                    onClick={() => onRemoveItem(index)}
-                    title="حذف السطر (Delete)"
-                    className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => onRemoveItem(index)}
+                  title="حذف السطر (Delete)"
+                  className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
           );

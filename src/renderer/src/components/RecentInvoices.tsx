@@ -53,7 +53,7 @@ export const RecentInvoices: React.FC = () => {
             سجل آخر 10 فواتير مبيعات مسجلة
           </span>
           <span className="text-xs font-mono text-slate-400">
-            (Last 10 Invoices from #864)
+            {invoices.length > 0 ? `(حتى فاتورة #${invoices[0].invoice_number})` : ''}
           </span>
         </div>
 

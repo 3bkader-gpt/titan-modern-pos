@@ -227,7 +227,10 @@ export const PosView: React.FC = () => {
       }
       const item = updated[index];
       const validQty = Math.round(newQty * 100) / 100;
-      const lineTotal = Math.round(validQty * item.unit_price * (1 - (item.discount_pct || 0) / 100) * 100) / 100;
+      const rawSubtotal = (item.unit_type === 'unit' && item.package_units > 1)
+        ? (item.base_consumer_price * validQty) / item.package_units
+        : validQty * item.unit_price;
+      const lineTotal = Math.round(rawSubtotal * (1 - (item.discount_pct || 0) / 100) * 100) / 100;
       updated[index] = {
         ...item,
         quantity: validQty,
@@ -289,6 +292,99 @@ export const PosView: React.FC = () => {
     updateCurrentTab(tab => {
       const updated = [...tab.items];
       updated.splice(index, 1);
+      return { ...tab, items: updated };
+    });
+  };
+
+  // Legacy Titan-style instant arrow adjustment on the most recently scanned item (items[0])
+  const handleArrowAdjustLastItem = (delta: 1 | -1) => {
+    updateCurrentTab(tab => {
+      if (tab.items.length === 0) return tab;
+      const updated = [...tab.items];
+      const item = updated[0];
+      const pkg = item.package_units > 1 ? Math.round(item.package_units) : 1;
+
+      let newUnitType: 'pack' | 'unit' = item.unit_type;
+      let newQty = item.quantity;
+
+      if (pkg <= 1) {
+        // Syrups / creams / single-unit items: step by 1 pack (min 1)
+        newUnitType = 'pack';
+        newQty = Math.max(1, Math.round((item.quantity + delta) * 100) / 100);
+      } else if (item.unit_type === 'pack') {
+        if (delta > 0) {
+          newQty = Math.round((item.quantity + 1) * 100) / 100;
+        } else if (item.quantity > 1) {
+          newQty = Math.round((item.quantity - 1) * 100) / 100;
+        } else {
+          // Stepping down from 1 full box -> full strip count of the box (e.g. 1 box -> 3 strips)
+          newUnitType = 'unit';
+          newQty = pkg;
+        }
+      } else {
+        // Currently selling by strip ('unit')
+        const nextStrips = Math.round(item.quantity + delta);
+        if (nextStrips > pkg) {
+          // Stepping up past full box strip count -> snap cleanly back to 1 full pack
+          newUnitType = 'pack';
+          newQty = 1;
+        } else {
+          newUnitType = 'unit';
+          newQty = Math.max(1, nextStrips);
+        }
+      }
+
+      const isStrip = newUnitType === 'unit' && pkg > 1;
+      const unitPrice = isStrip
+        ? Math.round((item.base_consumer_price / pkg) * 100) / 100
+        : item.base_consumer_price;
+      const costPrice = isStrip
+        ? Math.round((item.base_buy_price / pkg) * 100) / 100
+        : item.base_buy_price;
+      const rawSubtotal = isStrip
+        ? (item.base_consumer_price * newQty) / pkg
+        : newQty * unitPrice;
+      const lineTotal = Math.round(rawSubtotal * (1 - (item.discount_pct || 0) / 100) * 100) / 100;
+
+      updated[0] = {
+        ...item,
+        unit_type: newUnitType,
+        quantity: newQty,
+        unit_price: unitPrice,
+        cost_price: costPrice,
+        line_total: lineTotal
+      };
+      return { ...tab, items: updated };
+    });
+  };
+
+  // Instant Left/Right toggle on last scanned item (1 عبوة <-> 1 شريط)
+  const handleToggleLastItemUnit = () => {
+    updateCurrentTab(tab => {
+      if (tab.items.length === 0) return tab;
+      const updated = [...tab.items];
+      const item = updated[0];
+      if (item.package_units <= 1) return tab;
+
+      const newUnitType: 'pack' | 'unit' = item.unit_type === 'pack' ? 'unit' : 'pack';
+      const isStrip = newUnitType === 'unit';
+      const newQty = 1;
+      const unitPrice = isStrip
+        ? Math.round((item.base_consumer_price / item.package_units) * 100) / 100
+        : item.base_consumer_price;
+      const costPrice = isStrip
+        ? Math.round((item.base_buy_price / item.package_units) * 100) / 100
+        : item.base_buy_price;
+      const lineTotal = Math.round(newQty * unitPrice * (1 - (item.discount_pct || 0) / 100) * 100) / 100;
+
+      updated[0] = {
+        ...item,
+        unit_type: newUnitType,
+        quantity: newQty,
+        unit_price: unitPrice,
+        cost_price: costPrice,
+        line_total: lineTotal
+      };
       return { ...tab, items: updated };
     });
   };
@@ -583,6 +679,11 @@ export const PosView: React.FC = () => {
       <div>
         <PosSearchInput
           onAddItem={handleAddItem}
+          disabledGlobalCapture={showReceiptModal || showReturnModal || !!drugEyeTargetItem}
+          hasCartItems={currentTab.items.length > 0}
+          onArrowAdjust={handleArrowAdjustLastItem}
+          onToggleLastUnit={handleToggleLastItemUnit}
+          onDeleteLastItem={() => handleRemoveItem(0)}
           onOpenDrugEye={item => {
             setDrugEyeTargetItem({
               item_id: item.item_id,

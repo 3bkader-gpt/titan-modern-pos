@@ -1,6 +1,7 @@
 import React from 'react';
 import { 
   ShoppingCart, 
+  Receipt,
   Pill, 
   Truck, 
   ClipboardList, 
@@ -9,7 +10,7 @@ import {
   LayoutDashboard
 } from 'lucide-react';
 
-export type NavTab = 'dashboard' | 'pos' | 'catalog' | 'purchases' | 'shortages' | 'treasury' | 'reports';
+export type NavTab = 'dashboard' | 'pos' | 'sales_invoices' | 'catalog' | 'purchases' | 'shortages' | 'treasury' | 'reports';
 
 interface NavigationProps {
   activeTab: NavTab;
@@ -36,6 +37,12 @@ export const navItems: NavItem[] = [
     label: 'نقطة البيع (الكاشير)',
     icon: ShoppingCart,
     shortcut: 'F1'
+  },
+  {
+    id: 'sales_invoices',
+    label: 'فواتير المبيعات',
+    icon: Receipt,
+    shortcut: 'F12'
   },
   {
     id: 'catalog',

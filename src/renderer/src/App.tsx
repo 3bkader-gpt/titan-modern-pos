@@ -4,6 +4,7 @@ import { Navigation, NavTab } from './components/Navigation';
 import { DashboardView } from './views/DashboardView';
 import { CatalogInventoryView } from './views/CatalogInventoryView';
 import { PosView } from './views/PosView';
+import { SalesInvoicesView } from './views/SalesInvoicesView';
 import { PurchasesView } from './views/PurchasesView';
 import { ShortagesView } from './views/ShortagesView';
 import { TreasuryShiftsView } from './views/TreasuryShiftsView';
@@ -157,7 +158,7 @@ export const App: React.FC = () => {
   // Global Keyboard Navigation (F1, F3-F7 & Esc)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (['F1', 'F3', 'F4', 'F5', 'F6', 'F7'].includes(e.key)) {
+      if (['F1', 'F3', 'F4', 'F5', 'F6', 'F7', 'F12'].includes(e.key)) {
         e.preventDefault();
       }
 
@@ -186,6 +187,9 @@ export const App: React.FC = () => {
           break;
         case 'F7':
           setActiveTab('catalog');
+          break;
+        case 'F12':
+          setActiveTab('sales_invoices');
           break;
         case 'Escape': {
           if (e.defaultPrevented) break;
@@ -239,6 +243,8 @@ export const App: React.FC = () => {
               {activeTab === 'dashboard' && (
                 <DashboardView stats={stats} loadingStats={loadingStats} />
               )}
+
+              {activeTab === 'sales_invoices' && <SalesInvoicesView />}
 
               {activeTab === 'catalog' && <CatalogInventoryView />}
 

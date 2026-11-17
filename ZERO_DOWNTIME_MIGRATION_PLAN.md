@@ -14,8 +14,9 @@ This document defines the complete engineering integration strategy and operatio
 | Attribute | Live Legacy System (Source) | Titan Modern POS (Target) |
 |---|---|---|
 | **Application** | Titan 3 / `M-TITAN-11` (`Phye.exe`, `emerg.w.exe`) | `Mariam Elhomeily Pharmacy.exe` (Electron 40 + React 19) |
-| **Runtime Path on Pharmacy PC** | `D:\Labirdo\M-TITAN-11` (configured via `Titan.path`) | Isolated folder, e.g., `D:\Mariam_Elhomeily_Pharmacy\` |
-| **Auxiliary Live Folders** | `Everytime stock\<YYMMDD>\*.csv`, `titan.everyday\2026\*.xml` | `<ChosenDataDir>\backups\` + USB `titan_backups\` |
+| **Runtime Path on Pharmacy PC** | `D:\Labirdo\M-TITAN-11` (configured via `Titan.path`) | Isolated folder: `D:\Mariam_Elhomeily_Pharmacy\` (`D:\` has ~224 GB free; avoid `C:\` with only ~6 GB free) |
+| **Auxiliary Live Folders** | **`D:\Everytime stock\<YYMMDD>\*.csv`**, **`D:\titan.everyday\2026\*.xml`** *(ignore stale copies on `C:\` and `E:\`)* | `<ChosenDataDir>\backups\` + USB `G:\titan_backups\` |
+| **USB Flash Drive Letter** | — | **`G:\`** (Removable FAT32, ~28 GB free; note: `F:\` is a local fixed partition on this PC) |
 | **Storage Technology** | Fixed-width binary `.phy` / `.ebw` + CP1256 `.txt` | `better-sqlite3` (`pharmacy.sqlite`, `WAL` + `FTS5`) |
 | **User-Selectable Data Dir** | Hardcoded in `Titan.path` | Configurable in installer wizard or in-app **`مكان الداتا`** (`storage-config.json`) |
 | **Windows Dependencies** | VB6 runtime, `msflxgrd.ocx`, `XI.dll`, `zlibwapi.dll` | 100% self-contained (offline bundled fonts & native ABI 143 bindings) |
@@ -120,20 +121,20 @@ The extraction script decodes `tar.phy` deterministically using the following ve
 - `0x314–0x315` (`2 B`, `<h` Int16 @ offset `788`): `tax_schedule_category` (controlled schedule classes `1` & `2`)
 - `0x31C–0x34D` (`50 B`, CP1256 @ offset `796`): `category`
 
-### 2.3 Exact 4-Stage ETL Command Pipeline
+### 2.3 Exact 4-Stage ETL Command Pipeline (On-PC Workflow B)
 
-All scripts currently read from `D:\pharmacy\old_sys\` (`TAR_PATH` / `BASE_DIR`). Before running on a fresh cutover snapshot, back up the prior `D:\pharmacy\old_sys` folder (if needed) and copy the fresh `T-0` legacy snapshot into `D:\pharmacy\old_sys\` so `Files\DBI`, `Files\DB`, `Everytime stock`, and `titan.everyday` are in place.
+On this Pharmacy PC (running **Workflow B — Direct On-PC Cutover** with Python 3 & Node.js installed locally), all staging and ETL work runs on `D:\Titan_Migration_Staging\` (never modifying `D:\Labirdo\M-TITAN-11`). Before running on a fresh cutover snapshot, copy the live `T-0` legacy snapshot (`D:\Labirdo\M-TITAN-11`, `D:\Everytime stock`, and `D:\titan.everyday` — strictly from `D:\`, ignoring stale copies on `C:\` and `E:\`) into `D:\Titan_Migration_Staging\old_sys\`.
 
 ```powershell
-# Stage 1: Extract binary .phy/.ebw + XML/CSV logs into clean SQLite (Read-Only on old_sys)
-python D:\pharmacy\clean_data\scripts\extract_titan_data.py
+# Stage 1: Extract binary .phy/.ebw + XML/CSV logs into clean SQLite (Read-Only on snapshot)
+python D:\Titan_Migration_Staging\scripts\extract_titan_data.py
 
-# Stage 1b: Copy extracted SQLite into Modern POS staging workspace
-Copy-Item -Path "D:\pharmacy\clean_data\titan_extracted.sqlite" `
-          -Destination "D:\pharmacy\titan_modern_pos\data\pharmacy.sqlite" -Force
+# Stage 1b: Copy extracted SQLite into staging workspace
+Copy-Item -Path "D:\Titan_Migration_Staging\titan_extracted.sqlite" `
+          -Destination "D:\Titan_Migration_Staging\pos\data\pharmacy.sqlite" -Force
 
 # Stage 2: Calibrate strip/unit counts (package_units) from tar.phy offset 196 & historical fractions
-Set-Location "D:\pharmacy\titan_modern_pos"
+Set-Location "D:\Titan_Migration_Staging\pos"
 node scripts\auto_detect_package_units.mjs
 
 # Stage 3: Deduplicate any legacy duplicate GL rows BEFORE Modern POS enforces unique GL index
@@ -155,12 +156,12 @@ npx tsx -e "import { initDatabase, checkLedgerIntegrity, closeDatabase } from '.
 sequenceDiagram
     autonumber
     participant Legacy as Legacy Phye.exe (Live Counter)
-    participant USB as USB F:\ & ETL Workstation
+    participant USB as USB G:\ & On-PC ETL (D:\Titan_Migration_Staging)
     participant Modern as Titan Modern POS (New App)
 
     Note over Legacy,Modern: PHASE 1 (T - 48h): Side-by-Side Install (0s Downtime)
     USB->>Modern: Install binaries to D:\Mariam_Elhomeily_Pharmacy + Staging Data Dir
-    Modern-->>Modern: Test Barcode Scanner (F2), Thermal 80mm/58mm Print (F10), Arabic UI
+    Modern-->>Modern: Test Barcode Scanner (F2) & Arabic UI (Thermal Print Deferred)
 
     Note over Legacy,Modern: PHASE 2 (T - 24h): Shadow Dress Rehearsal (0s Downtime)
     Legacy-->>USB: Read-only snapshot copy while Phye.exe keeps selling
@@ -179,14 +180,14 @@ sequenceDiagram
 ### Phase 1: Pre-Cutover Side-by-Side Staging & Hardware Verification (`T - 48h` to `T - 24h`)
 **Downtime:** `0 seconds` (Legacy `Phye.exe` remains open and serving customers normally).
 
-1. Plug USB drive `F:\` into the Pharmacy PC.
-2. Run **`تثبيت_سريع_على_كمبيوتر_الصيدلية.bat`** (`F:\install_wizard.ps1`).
-   - Install program binaries to `D:\Mariam_Elhomeily_Pharmacy` (or `C:\` if no `D:` fixed disk exists).
-   - For staging rehearsal, choose a staging data folder such as `D:\Mariam_Elhomeily_Staging_Data`.
+1. Plug USB drive **`G:\`** into the Pharmacy PC (note: `F:\` is an internal partition on this machine; ignore `G:\Titan.path` and `G:\Titan.guide` auto-created by legacy `Phye.exe`).
+2. Run **`تثبيت_سريع_على_كمبيوتر_الصيدلية.bat`** (`G:\install_wizard.ps1`).
+   - Install program binaries to `D:\Mariam_Elhomeily_Pharmacy`.
+   - For staging rehearsal, choose a staging data folder: `D:\Mariam_Elhomeily_Staging_Data`.
 3. Launch Titan Modern POS from the newly created Desktop shortcut **`صيدلية د. مريم الحميلي`**.
 4. Perform **non-intrusive hardware validation** on the actual pharmacy counter machine:
    - Scan a drug box with the **USB barcode scanner** inside the POS search bar (`F2`): verify instant item lookup + beep + cursor readiness.
-   - Verify **Thermal Printer (`80mm` or `58mm`)**: open a test preview or historical invoice, press **`F10`** / Print to verify paper width alignment, crisp Arabic Cairo font, and zero clipping (`@media print` rules). (Use a scratch folder or revert/discard any test invoice in staging; never carry staging invoices into `T-0` production DB).
+   - *(Thermal Printer Deferred)*: Receipt printing (`F10`) validation is deferred for now because the counter printer is currently non-functional.
    - Brief counter pharmacists on core hotkeys:
      - `F1`: POS | `F2`: Focus Search | `F3`: Purchases | `F4`: Shortages
      - `F5`: Treasury & Shifts | `F6`: Financial Reports | `F7`: Catalog & Stock
@@ -197,8 +198,8 @@ sequenceDiagram
 ### Phase 2: Shadow Dress Rehearsal & Parity Audit (`T - 24h`)
 **Downtime:** `0 seconds`.
 
-1. Without closing `Phye.exe`, take a read-only copy of `D:\Labirdo\M-TITAN-11`, `Everytime stock`, and `titan.everyday` (or schedule between customers).
-2. Run the 4-stage ETL pipeline (Section 2.3) end-to-end.
+1. Without closing `Phye.exe`, take a read-only copy of **`D:\Labirdo\M-TITAN-11`**, **`D:\Everytime stock`**, and **`D:\titan.everyday`** (strictly from `D:\`, ignoring outdated copies on `C:\` and `E:\`) into `D:\Titan_Migration_Staging\old_sys\`.
+2. Run the 4-stage ETL pipeline (Section 2.3) directly on the Pharmacy PC (Workflow B) end-to-end.
 3. Time the entire run to establish baseline duration (~30–45 seconds once files are copied).
 4. Compare **10 random items** (stock + consumer price + expiry), **latest invoice number `#N`**, **latest purchase invoice**, and **`Foloos.phy` cash balance** between `Phye.exe` and Titan Modern POS (`pharmacy.sqlite`). Resolve any custom local quirks before shift cutover.
 
@@ -208,34 +209,28 @@ sequenceDiagram
 **Target Window:** Natural quiet shift handover (e.g. afternoon/night shift transition when no customer is waiting at the register).  
 **Anti-Split-Brain Golden Rule:** Once the `T-0` snapshot begins, **never create another invoice in `Phye.exe`**. There must only ever be **one active writer**.
 
-#### Choose Workflow A or B based on Pharmacy PC tooling:
+#### Selected Execution Mode: **Workflow B — Direct On-PC Cutover** (Python 3 + Node.js installed on Pharmacy PC; no dev laptop required)
 
-##### Workflow A — USB Shuttle Cutover (Pharmacy PC has NO Python / Node installed)
+##### Workflow B — Direct On-PC Cutover *(ACTIVE PRODUCTION PATH)*
 1. **Freeze Legacy Writer (`~15 sec`):**
    - Finish serving the current customer in `Phye.exe`.
    - Record on paper: **Last Sales Invoice `#N`**, **Physical Drawer Cash (`X EGP`)**, and **`Phye.exe` Cash Balance**.
    - Close `Phye.exe`.
    - Rename the legacy Desktop shortcut to `Archive - Old Titan (DO NOT USE FOR SALES)`.
-2. **Copy Live Snapshot to USB (`~15 sec`):**
-   - Copy `D:\Labirdo\M-TITAN-11` (and `Everytime stock` / `titan.everyday` if present on `D:\`) to `F:\live_cutover_snapshot\`.
-3. **Run 4-Stage ETL on Developer Laptop (`~1–2 min`):**
-   - Copy `F:\live_cutover_snapshot\` into `D:\pharmacy\old_sys\` (backing up previous `old_sys` first).
-   - Run **Stages 1 -> 2 -> 3 -> 4** from Section 2.3.
-   - Verify the **5-Point Go-Live Gate** (Section 4) passes with `0.00` GL imbalance.
-   - Copy the freshly minted `D:\pharmacy\titan_modern_pos\data\pharmacy.sqlite` (`~14 MB`) to `F:\fresh_production_db\pharmacy.sqlite`.
-4. **Attach Live DB on Pharmacy PC (`~20 sec`):**
-   - Copy `F:\fresh_production_db\pharmacy.sqlite` into the Pharmacy PC's permanent protected data folder, e.g.:  
-     `D:\Mariam_Elhomeily_Pharmacy_Data\pharmacy.sqlite`
-   - Open Titan Modern POS (`صيدلية د. مريم الحميلي`).
-   - Click **`مكان الداتا`** in the top header -> **`اختيار / تغيير مجلد حفظ الداتا...`** -> select `D:\Mariam_Elhomeily_Pharmacy_Data` -> choose **"فتح واستخدام قاعدة البيانات الموجودة في هذا المجلد"**.
-5. **Handling Walk-In Customers During the 2–3 Minute Shuttle (Zero Customer Wait):**
-   - If an urgent customer walks in during Steps 2–4, **do NOT reopen `Phye.exe`** (reopening creates split-brain). Dispense the medication immediately and jot barcode + qty + cash on a **Cutover Tally Sheet**. The second Titan Modern POS comes up in Step 4, scan those items as Invoice `#N + 1` in <10 seconds. Customer service never stops.
+2. **Snapshot & Run Stages 1–4 Locally (`~35–45 sec`):**
+   - Copy `D:\Labirdo\M-TITAN-11`, `D:\Everytime stock`, and `D:\titan.everyday` into `D:\Titan_Migration_Staging\old_sys\`.
+   - Execute Stages 1–4 directly on the Pharmacy PC and verify the **5-Point Go-Live Gate** (Section 4) passes with `0.00` GL imbalance.
+3. **Attach Live DB & Go Live (`~15 sec`):**
+   - Place the verified `pharmacy.sqlite` into `D:\Mariam_Elhomeily_Pharmacy_Data\pharmacy.sqlite`.
+   - Open Titan Modern POS (`صيدلية د. مريم الحميلي`), click **`مكان الداتا`** -> **`اختيار / تغيير مجلد حفظ الداتا...`** -> select `D:\Mariam_Elhomeily_Pharmacy_Data` -> choose **"فتح واستخدام قاعدة البيانات الموجودة في هذا المجلد"**.
+   - Verify Header stats (`#N`, Treasury Cash, Balanced GL), open **Shift #1 (`F5`)** with physical opening cash count, and ring up Invoice `#N + 1`. **Total counter transition: < 60 seconds.**
+4. **Handling Walk-In Customers During Cutover (Zero Customer Wait):**
+   - If an urgent customer walks in during Steps 2–3, **do NOT reopen `Phye.exe`** (reopening creates split-brain). Dispense the medication immediately and jot barcode + qty + cash on a **Cutover Tally Sheet**, then scan those items as Invoice `#N + 1` once Titan Modern POS opens.
 
-##### Workflow B — Direct On-PC Cutover (If Python 3 + Node.js are installed on Pharmacy PC)
-1. Finish active customer -> record `#N` and cash balance -> close `Phye.exe` -> rename legacy shortcut.
-2. Snapshot `D:\Labirdo\M-TITAN-11` into staging, execute Stages 1–4 directly on the Pharmacy PC (`~35–45 seconds`).
-3. Move the verified `pharmacy.sqlite` into `D:\Mariam_Elhomeily_Pharmacy_Data\pharmacy.sqlite` and attach via **`مكان الداتا`** (or overwrite when app is closed).
-4. Reopen Titan Modern POS, verify Header stats, open **Shift #1 (`F5`)** with physical opening cash count, and ring up Invoice `#N + 1`. **Total counter transition: < 60 seconds.**
+##### Workflow A — USB Shuttle Fallback (Only if running ETL on an external Developer Laptop via `G:\`)
+1. Freeze `Phye.exe` as above -> copy `D:\Labirdo\M-TITAN-11`, `D:\Everytime stock`, and `D:\titan.everyday` to `G:\live_cutover_snapshot\`.
+2. Run Stages 1–4 on external laptop -> copy verified `pharmacy.sqlite` to `G:\fresh_production_db\pharmacy.sqlite`.
+3. Copy `G:\fresh_production_db\pharmacy.sqlite` to `D:\Mariam_Elhomeily_Pharmacy_Data\pharmacy.sqlite` and attach via **`مكان الداتا`**.
 
 ---
 
@@ -258,7 +253,7 @@ Before issuing live Invoice `#N + 1` to the first patient, verify every check pa
 ### 5.1 Daily Hypercare Protocol
 - **Keep Legacy Frozen Archive (`30 Days`):** Never delete `D:\Labirdo\M-TITAN-11`. Keep it read-only on disk for at least 30 days as historical reference.
 - **Strict Shift Handovers (`F5`):** Have cashiers open shifts (`فتح وردية`) with exact starting drawer float and close shifts (`إغلاق ومطابقة الوردية`) at every shift boundary—comparing `expected_cash` against physical drawer count (`discrepancy`).
-- **End-of-Day Dual Backup (`نسخ احتياطي`):** Plug USB flash drive in for 5 seconds at closing and click **`نسخ احتياطي`** in the header. SQLite's non-blocking Online Backup API writes both `<ChosenDataDir>\backups\pharmacy_backup_<timestamp>.sqlite` and `F:\titan_backups\...` without slowing or interrupting open tabs.
+- **End-of-Day Dual Backup (`نسخ احتياطي`):** Plug USB flash drive (`G:\`) in for 5 seconds at closing and click **`نسخ احتياطي`** in the header. SQLite's non-blocking Online Backup API writes both `<ChosenDataDir>\backups\pharmacy_backup_<timestamp>.sqlite` and `G:\titan_backups\...` without slowing or interrupting open tabs.
 - **Weekly Reports Audit (`F6`):** Verify Financial P&L (`getFinancialReport`) and General Ledger balance after the first week of live returns, purchases, credit sales, and expenses.
 
 ### 5.2 Emergency Instant Rollback (`< 60 Seconds`, Zero Data Loss)
@@ -269,3 +264,32 @@ Because `D:\Labirdo\M-TITAN-11` is **never modified** during migration or modern
 3. Restore the legacy Desktop shortcut to `D:\Labirdo\M-TITAN-11\Phye.exe`.
 4. Key in only the delta transactions (`#N + 1..#K`) into `Phye.exe` so legacy stock and cash remain 100% continuous.
 5. Diagnose the issue on the frozen `<ChosenDataDir>\pharmacy.sqlite` snapshot offline without affecting counter operations.
+
+---
+
+## 6. Production Field Log & Status (`2026-11-17` / `2026-11-18`)
+
+### 6.1 Completed On-Site on the Pharmacy Production PC (`0s Downtime`)
+- **Environment Verified:** Windows 10 Pro 64-bit (`8 GB RAM`), `D:\` (`224 GB` free), `C:\` (`6.2 GB` free — avoided), USB Flash Drive mounted on **`G:\`** (note: `F:\` is a local fixed partition). Thermal counter printer confirmed non-functional / deferred.
+- **Workflow B Tooling Installed Locally (No Dev Laptop Needed):**
+  - **Python `3.12.10`** (User Scope) & **Node.js `v22.23.5` LTS** (`D:\Tools\node`).
+  - Lightweight ETL + build environment staged in `D:\Titan_Migration_Staging\` (preserving Electron ABI 143 `better-sqlite3`).
+  - Reconstructed & regression-verified Stage 1 extractor (`extract_titan_data.py`), upgraded Stage 3 GL deduplicator (`fix_gl_duplicates.cjs` to handle 3x ring-buffer wraparound duplicates + VB6 `<f>` 0.10 EGP rounding), and created 1-click atomic cutover script (`D:\Titan_Migration_Staging\run_t0_cutover.ps1`). Copies synced to `G:\Migration_Scripts\` and `G:\Source_Code\scripts\`.
+- **Phase 1 Completed (`0s Downtime`):**
+  - Installed Titan Modern POS side-by-side in `D:\Mariam_Elhomeily_Pharmacy\` pointing to isolated staging DB `D:\Mariam_Elhomeily_Staging_Data\pharmacy.sqlite` (zero interference with live `Phye.exe`).
+  - Desktop shortcut **`صيدلية د. مريم الحميلي`** created.
+- **Phase 2 Shadow Dress Rehearsal Completed (`0s Downtime`):**
+  - Read-only snapshot of live `D:\Labirdo\M-TITAN-11`, `D:\Everytime stock`, and `D:\titan.everyday` completed in **`22.5s`**.
+  - Full 4-Stage ETL (`extract_titan_data.py` -> `auto_detect_package_units.mjs` -> `fix_gl_duplicates.cjs` -> `initDatabase()` + `checkLedgerIntegrity()`) completed in **`12.53s`**.
+  - **5-Point Gate PASSED (5/5):** `PRAGMA integrity_check = ok`, `GL Debit = Credit = 383,620.50 EGP (diff = 0.00)`, `idx_gl_unique_doc_account` active, Treasury = `276,666.50 EGP`, `items = 18,704`, max Sales = `#1989`, max Purchases = `#468`, historical regression parity `863/864` exact to the piaster.
+  - Clean `2026-11-17` DB exported to `G:\data\pharmacy.sqlite` and `G:\Source_Code\data\pharmacy.sqlite` for offline development.
+- **On-Site UX & Hardware Fixes Built, Deployed & Synced to `G:\Source_Code\` and `G:\app\resources\app.asar`:**
+  1. **Global Barcode Scanner Auto-Capture & Fast-Enter Fix (`PosSearchInput.tsx`):** Scans work anywhere on `F1` POS without clicking the search input first; fast `Enter` never collides with debounce or steals input on other tabs.
+  2. **GS1 DataMatrix (2D QR) + GTIN-14 + Arabic Numerals (`src/main/db.ts`):** `searchItems()` extracts GTIN/EAN-13 from `(01)...`, `01...`, leading zeros, and Arabic-Indic numerals across all screens.
+  3. **Legacy Titan-Style Arrow Strip Control (`PosView.tsx` + `PosSearchInput.tsx`):** Immediately after scanning, `↓` steps `1 عبوة` -> full box strip count (e.g. `3 شريط`, exact box price without 1-piaster loss) -> `2` -> `1`; `↑` steps back up to `1 عبوة` -> `2 عبوة`; `←/→` toggles `1 عبوة ⇄ 1 شريط`; `Delete` removes last scanned row.
+  4. **Cart Table Layout Fix (`PosCartTable.tsx`):** Eliminated horizontal scrollbar; Delete (`🗑️`) and DrugEye (`✨`) action buttons are 100% visible on all screen widths.
+  5. **Full Sales Invoices Screen (`SalesInvoicesView.tsx`, `F12`):** Dedicated sidebar screen under `F1` POS with all historical invoices, legacy `< #N >` invoice stepper, instant search, date filters (`اليوم`/`أمس`/`7 أيام`/`الكل`), split-view item details, and direct Return button.
+
+### 6.2 Remaining Before Final Go-Live (`Phase 3 — T-0`)
+1. Complete any desired pre-cutover feature additions offline on Dev Laptop (using `G:\Source_Code\` + fresh `G:\data\pharmacy.sqlite`), rebuild, and update `D:\Mariam_Elhomeily_Pharmacy\`.
+2. At a quiet shift handover: finish active customer in `Phye.exe` -> record `#N` and physical cash -> close `Phye.exe` & Modern POS -> rename legacy shortcut -> run **`D:\Titan_Migration_Staging\run_t0_cutover.ps1`** (~35s total) -> verify 5-Point Gate -> open Shift #1 (`F5`) -> sell `#N + 1` live!

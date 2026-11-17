@@ -11,8 +11,8 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-const DB_PATH = path.resolve('data', 'pharmacy.sqlite');
-const TAR_PATH = 'D:\\pharmacy\\old_sys\\Labirdo\\M-TITAN-11\\Files\\DBI\\tar.phy';
+const DB_PATH = process.env.DB_PATH || path.resolve('data', 'pharmacy.sqlite');
+const TAR_PATH = process.env.TAR_PATH || 'D:\\Titan_Migration_Staging\\old_sys\\Labirdo\\M-TITAN-11\\Files\\DBI\\tar.phy';
 const RECORD_SIZE = 856;
 
 console.log('========================================================================');
