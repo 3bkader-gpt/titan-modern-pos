@@ -47,7 +47,9 @@ import {
   UpdateSaleInvoicePayload,
   InvoiceRevisionEntry,
   ItemBarcodeEntry,
-  AdvancedDrugSearchFilter
+  AdvancedDrugSearchFilter,
+  ImportedPurchaseRowInput,
+  MatchedImportPurchaseRow
 } from '../shared/types';
 
 export const electronAPI = {
@@ -274,7 +276,15 @@ export const electronAPI = {
 
   // Module 6: 9-Method Advanced Drug Finder API
   advancedSearchItems: (filter: AdvancedDrugSearchFilter): Promise<Item[]> =>
-    ipcRenderer.invoke('db:advancedSearchItems', filter)
+    ipcRenderer.invoke('db:advancedSearchItems', filter),
+
+  // Module 7: Smart CSV/Excel Purchase Invoice Import Matching API
+  matchImportedPurchaseRows: (
+    rows: ImportedPurchaseRowInput[],
+    supplierId?: number,
+    columnMapJson?: string
+  ): Promise<MatchedImportPurchaseRow[]> =>
+    ipcRenderer.invoke('purchase:matchImportedRows', rows, supplierId, columnMapJson)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

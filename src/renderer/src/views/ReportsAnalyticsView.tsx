@@ -28,6 +28,7 @@ import {
   CheckCircle2,
   Clock
 } from 'lucide-react';
+import { downloadUtf8BomCsv } from '../components/common/ExportExcelButton';
 
 export const ReportsAnalyticsView: React.FC = () => {
   // Navigation Tabs inside Reports
@@ -125,20 +126,14 @@ export const ReportsAnalyticsView: React.FC = () => {
     else if (activeTab === 'movers_audit') loadMoversAndAudit();
   }, [activeTab, loadFinancial, loadValuation, loadMoversAndAudit]);
 
-  // Export CSV
+  // Export CSV (UTF-8 BOM compliant for Arabic Excel)
   const handleExportCSV = () => {
     if (!financialReport) return;
-    const headers = 'التاريخ,المبيعات,الأرباح,المصروفات\n';
-    const rows = financialReport.daily_breakdown
-      .map(d => `${d.date},${d.sales},${d.profit},${d.expenses}`)
-      .join('\n');
-    const blob = new Blob([headers + rows], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `تقرير_الأرباح_اليومي_${financialReport.startDate}_${financialReport.endDate}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadUtf8BomCsv(
+      `تقرير_الأرباح_اليومي_${financialReport.startDate}_${financialReport.endDate}`,
+      ['التاريخ', 'المبيعات', 'الأرباح', 'المصروفات'],
+      financialReport.daily_breakdown.map(d => [d.date, d.sales, d.profit, d.expenses])
+    );
   };
 
   return (

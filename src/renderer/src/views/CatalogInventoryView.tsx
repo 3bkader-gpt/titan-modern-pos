@@ -24,6 +24,7 @@ import { ItemHistoryModal } from '../components/inventory/ItemHistoryModal';
 import { EditStockModal } from '../components/inventory/EditStockModal';
 import { DrugEyeSubstituteModal } from '../components/pos/DrugEyeSubstituteModal';
 import { BarcodeLabelModal, BarcodeLabelPrintItem } from '../components/inventory/BarcodeLabelModal';
+import { ExportExcelButton } from '../components/common/ExportExcelButton';
 
 export const CatalogInventoryView: React.FC = () => {
   // State
@@ -172,7 +173,27 @@ export const CatalogInventoryView: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-end md:self-auto">
+          <div className="flex items-center gap-2 self-end md:self-auto flex-wrap">
+            <ExportExcelButton
+              fileNamePrefix="كتالوج_المخزون"
+              disabled={result.items.length === 0}
+              headers={['كود الصنف', 'الباركود', 'الاسم الإنجليزي', 'الاسم العربي', 'المادة الفعالة', 'الشركة المنتجة', 'سعر الجمهور', 'التكلفة', 'الرصيد', 'الصلاحية']}
+              getRows={() =>
+                result.items.map((it) => [
+                  it.item_id,
+                  it.barcode || '',
+                  it.item_name_en,
+                  it.item_name_ar || '',
+                  it.generic_name || '',
+                  it.producer || '',
+                  it.consumer_price,
+                  it.buy_price || 0,
+                  it.current_stock,
+                  it.expiry_date || ''
+                ])
+              }
+            />
+
             <button
               onClick={() => loadData()}
               disabled={loading}

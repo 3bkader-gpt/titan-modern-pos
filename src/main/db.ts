@@ -52,6 +52,8 @@ import {
   ItemBarcodeEntry,
   SearchScope,
   AdvancedDrugSearchFilter,
+  ImportedPurchaseRowInput,
+  MatchedImportPurchaseRow,
   AuditLogs,
   LedgerIntegrityStatus
 } from '../shared/types';
@@ -382,6 +384,9 @@ function ensureSchemaUpgrades(database: Database.Database) {
       });
       txBackfill();
     }
+
+    // M7: Per-Supplier Excel/CSV Column Mapping Persistence
+    safeAddColumn('suppliers', "excel_column_map_json TEXT DEFAULT ''");
 
     // Ensure Dr. Mariam Elhomeily account exists in users table
     const existingDoctor = database.prepare("SELECT * FROM users WHERE user_name LIKE '%مريم%' OR user_name LIKE '%الحميلي%'").get();
@@ -2523,7 +2528,8 @@ export function getSuppliers(): Supplier[] {
         2
       ) as current_balance,
       (SELECT MAX(p.invoice_date) FROM purchases_invoices p WHERE p.supplier_id = s.supplier_id) as last_invoice_date,
-      (SELECT COUNT(p.purchase_invoice_id) FROM purchases_invoices p WHERE p.supplier_id = s.supplier_id) as invoices_count
+      (SELECT COUNT(p.purchase_invoice_id) FROM purchases_invoices p WHERE p.supplier_id = s.supplier_id) as invoices_count,
+      COALESCE(s.excel_column_map_json, '') as excel_column_map_json
     FROM suppliers s
     ORDER BY s.supplier_id ASC
   `).all() as Supplier[];
@@ -5154,6 +5160,145 @@ export function ensureItemHasBarcode(itemId: number): string {
   tx();
 
   return generated;
+}
+
+/**
+ * Module 7: Bulk auto-match imported purchase invoice rows against catalog (Barcode -> ID -> Name)
+ * and persist supplier Excel column mapping preferences.
+ */
+export function matchImportedPurchaseRows(
+  rows: ImportedPurchaseRowInput[],
+  supplierId?: number,
+  columnMapJson?: string
+): MatchedImportPurchaseRow[] {
+  const database = getDatabaseInstance();
+
+  if (supplierId && supplierId > 0 && columnMapJson !== undefined) {
+    database
+      .prepare('UPDATE suppliers SET excel_column_map_json = ? WHERE supplier_id = ?')
+      .run(columnMapJson, supplierId);
+  }
+
+  const byItemIdStmt = database.prepare('SELECT * FROM items WHERE item_id = ? LIMIT 1');
+  const byExactNameStmt = database.prepare('SELECT * FROM items WHERE UPPER(TRIM(item_name_en)) = UPPER(?) LIMIT 1');
+  const byArNameStmt = database.prepare('SELECT * FROM items WHERE TRIM(item_name_ar) = ? LIMIT 1');
+  const byPrefixNameStmt = database.prepare(`
+    SELECT * FROM items
+    WHERE UPPER(TRIM(item_name_en)) LIKE UPPER(?)
+    ORDER BY (CASE WHEN current_stock > 0 THEN 0 ELSE 1 END), LENGTH(item_name_en) ASC
+    LIMIT 1
+  `);
+
+  return (rows || []).map((row) => {
+    let matchedItem: Item | null = null;
+    let matchStatus: MatchedImportPurchaseRow['matchStatus'] = 'UNMATCHED';
+
+    // 1. Barcode Match (primary items.barcode + secondary item_barcodes)
+    if (row.barcode && row.barcode.trim()) {
+      const candidates = extractBarcodeCandidates(row.barcode.trim());
+      if (candidates.length > 0) {
+        const placeholders = candidates.map(() => '?').join(', ');
+        const direct = database
+          .prepare(`SELECT * FROM items WHERE TRIM(COALESCE(barcode, '')) IN (${placeholders}) LIMIT 1`)
+          .get(...candidates) as Item | undefined;
+        if (direct) {
+          matchedItem = direct;
+          matchStatus = 'BARCODE';
+        } else {
+          const secondary = database
+            .prepare(`
+              SELECT i.* FROM item_barcodes ib
+              JOIN items i ON ib.item_id = i.item_id
+              WHERE TRIM(ib.barcode) IN (${placeholders})
+              LIMIT 1
+            `)
+            .get(...candidates) as Item | undefined;
+          if (secondary) {
+            matchedItem = secondary;
+            matchStatus = 'BARCODE';
+          }
+        }
+      }
+    }
+
+    // 2. Direct Item ID Match
+    if (!matchedItem && row.itemId && Number(row.itemId) > 0) {
+      const idHit = byItemIdStmt.get(Number(row.itemId)) as Item | undefined;
+      if (idHit) {
+        matchedItem = idHit;
+        matchStatus = 'ID';
+      }
+    }
+
+    // 3. Name Match (Exact English/Arabic -> Prefix -> Phonetic)
+    if (!matchedItem && row.itemName && row.itemName.trim()) {
+      const cleanName = row.itemName.trim();
+      const exactHit =
+        (byExactNameStmt.get(cleanName) as Item | undefined) ||
+        (byArNameStmt.get(cleanName) as Item | undefined) ||
+        (byPrefixNameStmt.get(`${cleanName}%`) as Item | undefined);
+
+      if (exactHit) {
+        matchedItem = exactHit;
+        matchStatus = 'NAME';
+      } else {
+        const pKey = computePhoneticKey(cleanName);
+        if (pKey && pKey.length >= 3) {
+          const pTokens = pKey.split(' ').filter(Boolean);
+          const clauses = pTokens.map(() => "COALESCE(phonetic_key, '') LIKE ?");
+          const pHit = database
+            .prepare(`
+              SELECT * FROM items
+              WHERE ${clauses.join(' AND ')}
+              ORDER BY (CASE WHEN current_stock > 0 THEN 0 ELSE 1 END), LENGTH(item_name_en) ASC
+              LIMIT 1
+            `)
+            .get(...pTokens.map(t => `%${t}%`)) as Item | undefined;
+          if (pHit) {
+            matchedItem = pHit;
+            matchStatus = 'NAME';
+          }
+        }
+      }
+    }
+
+    const resolvedQuantity = Math.max(0.01, Number(row.quantity) || 1);
+    const resolvedBonus = Math.max(0, Number(row.bonusQuantity) || 0);
+    const resolvedConsumerPrice =
+      Number(row.consumerPrice) > 0
+        ? Number(row.consumerPrice)
+        : Number(matchedItem?.consumer_price || 0);
+    const resolvedDiscountPct =
+      row.discountPct !== undefined && Number(row.discountPct) >= 0
+        ? Number(row.discountPct)
+        : Number(matchedItem?.discount_pct || 0);
+
+    let resolvedBuyPrice = Number(row.buyPrice || 0);
+    if (resolvedBuyPrice <= 0) {
+      if (resolvedConsumerPrice > 0 && resolvedDiscountPct > 0) {
+        resolvedBuyPrice = Math.round(resolvedConsumerPrice * (1 - resolvedDiscountPct / 100) * 100) / 100;
+      } else {
+        resolvedBuyPrice = Number(matchedItem?.buy_price || 0);
+      }
+    }
+
+    const resolvedLineTotal = Math.round(resolvedQuantity * resolvedBuyPrice * 100) / 100;
+    const resolvedExpiryDate = String(row.expiryDate || matchedItem?.expiry_date || '').trim();
+
+    return {
+      rowIndex: row.rowIndex,
+      input: row,
+      matchStatus,
+      matchedItem,
+      resolvedQuantity,
+      resolvedBonus,
+      resolvedConsumerPrice,
+      resolvedDiscountPct,
+      resolvedBuyPrice,
+      resolvedLineTotal,
+      resolvedExpiryDate
+    };
+  });
 }
 
 

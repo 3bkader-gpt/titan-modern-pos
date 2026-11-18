@@ -10,6 +10,8 @@ import {
 import { SupplierStatementTab } from '../components/purchases/SupplierStatementTab';
 import { PurchaseReturnTab } from '../components/purchases/PurchaseReturnTab';
 import { BarcodeLabelModal, BarcodeLabelPrintItem } from '../components/inventory/BarcodeLabelModal';
+import { ExcelPurchaseImportModal, ImportedDraftLineOutput } from '../components/purchases/ExcelPurchaseImportModal';
+import { ExportExcelButton } from '../components/common/ExportExcelButton';
 import { 
   Truck, 
   Plus, 
@@ -33,7 +35,8 @@ import {
   Check,
   RotateCcw,
   Wallet,
-  Barcode
+  Barcode,
+  FileSpreadsheet
 } from 'lucide-react';
 
 interface PurchasesViewProps {
@@ -105,6 +108,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   const [loadingDetails, setLoadingDetails] = useState<boolean>(false);
   const [barcodePrintItems, setBarcodePrintItems] = useState<BarcodeLabelPrintItem[] | null>(null);
   const [lastSavedPrintItems, setLastSavedPrintItems] = useState<BarcodeLabelPrintItem[] | null>(null);
+  const [isExcelImportOpen, setIsExcelImportOpen] = useState<boolean>(false);
 
   // Add Supplier Modal state
   const [isAddSupplierOpen, setIsAddSupplierOpen] = useState<boolean>(false);
@@ -711,18 +715,47 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
 
             {/* Receiving Items Table */}
             <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs overflow-hidden">
-              <div className="p-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
+              <div className="p-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 bg-slate-50/60">
                 <span className="text-xs font-bold text-slate-800">
                   الأصناف الموردة بالفاتورة ({draftLines.length})
                 </span>
-                {draftLines.length > 0 && (
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setDraftLines([])}
-                    className="text-[11px] text-rose-600 hover:underline"
+                    type="button"
+                    onClick={() => setIsExcelImportOpen(true)}
+                    className="px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
-                    تفريغ الأصناف
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-blue-600" />
+                    <span>استيراد من Excel / CSV</span>
                   </button>
-                )}
+                  <ExportExcelButton
+                    fileNamePrefix="مسودة_فاتورة_مشتريات"
+                    label="تصدير الفاتورة Excel"
+                    disabled={draftLines.length === 0}
+                    headers={['كود الصنف', 'اسم الصنف', 'الكمية', 'بونص', 'سعر الجمهور', 'خصم %', 'تكلفة الشراء', 'الإجمالي', 'الصلاحية']}
+                    getRows={() =>
+                      draftLines.map(l => [
+                        l.item_id,
+                        l.item_name_en,
+                        l.quantity,
+                        l.bonus_quantity,
+                        l.consumer_price,
+                        l.discount_pct,
+                        l.buy_price,
+                        l.line_total,
+                        l.expiry_date
+                      ])
+                    }
+                  />
+                  {draftLines.length > 0 && (
+                    <button
+                      onClick={() => setDraftLines([])}
+                      className="text-[11px] text-rose-600 hover:underline px-2"
+                    >
+                      تفريغ الأصناف
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="overflow-x-auto">
@@ -1376,6 +1409,26 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
         isOpen={!!barcodePrintItems}
         items={barcodePrintItems || []}
         onClose={() => setBarcodePrintItems(null)}
+      />
+
+      {/* M7: Excel/CSV Smart Purchase Import Modal */}
+      <ExcelPurchaseImportModal
+        isOpen={isExcelImportOpen}
+        supplier={suppliers.find(s => s.supplier_id === selectedSupplierId) || null}
+        onClose={() => setIsExcelImportOpen(false)}
+        onImportLines={(imported: ImportedDraftLineOutput[], savedMapJson: string) => {
+          setDraftLines(prev => [...prev, ...imported]);
+          if (selectedSupplierId) {
+            setSuppliers(prev =>
+              prev.map(s =>
+                s.supplier_id === selectedSupplierId
+                  ? { ...s, excel_column_map_json: savedMapJson }
+                  : s
+              )
+            );
+          }
+          notifyStatus(`تم إدراج ${imported.length} صنفاً بنجاح من شيت المورد في الفاتورة.`, 'success');
+        }}
       />
     </div>
   );

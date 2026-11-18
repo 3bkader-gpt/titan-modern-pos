@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ShortageItem, Supplier, Item } from '../../../shared/types';
+import { ExportExcelButton } from '../components/common/ExportExcelButton';
 import { 
   ClipboardList, 
   Search, 
@@ -328,7 +329,27 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-end md:self-auto">
+          <div className="flex items-center gap-2 self-end md:self-auto flex-wrap">
+            <ExportExcelButton
+              fileNamePrefix="كشكول_النواقص"
+              label="تصدير Excel للمورد"
+              disabled={shortages.length === 0}
+              headers={['كود الصنف', 'الاسم الإنجليزي', 'الاسم العربي', 'الكمية المطلوبة', 'الرصيد الحالي', 'سعر الجمهور', 'التكلفة', 'المورد', 'الباركود']}
+              getRows={() =>
+                shortages.map((s) => [
+                  s.item_id,
+                  s.item_name,
+                  s.item_name_ar || '',
+                  s.quantity,
+                  s.current_stock,
+                  s.consumer_price,
+                  s.buy_price || 0,
+                  s.supplier_name,
+                  s.barcode || ''
+                ])
+              }
+            />
+
             {/* Clear Available */}
             <button
               onClick={handleClearCompleted}

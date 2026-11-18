@@ -276,6 +276,46 @@ export interface Supplier {
   current_balance?: number;
   last_invoice_date?: string | null;
   invoices_count?: number;
+  excel_column_map_json?: string | null;
+}
+
+export interface SupplierColumnMapping {
+  barcodeCol?: string;
+  itemIdCol?: string;
+  itemNameCol?: string;
+  quantityCol?: string;
+  bonusCol?: string;
+  consumerPriceCol?: string;
+  discountPctCol?: string;
+  buyPriceCol?: string;
+  expiryDateCol?: string;
+}
+
+export interface ImportedPurchaseRowInput {
+  rowIndex: number;
+  barcode?: string;
+  itemId?: number;
+  itemName?: string;
+  quantity: number;
+  bonusQuantity?: number;
+  consumerPrice?: number;
+  discountPct?: number;
+  buyPrice?: number;
+  expiryDate?: string;
+}
+
+export interface MatchedImportPurchaseRow {
+  rowIndex: number;
+  input: ImportedPurchaseRowInput;
+  matchStatus: 'BARCODE' | 'ID' | 'NAME' | 'UNMATCHED';
+  matchedItem?: Item | null;
+  resolvedQuantity: number;
+  resolvedBonus: number;
+  resolvedConsumerPrice: number;
+  resolvedDiscountPct: number;
+  resolvedBuyPrice: number;
+  resolvedLineTotal: number;
+  resolvedExpiryDate: string;
 }
 
 export interface SupplierStatementEntry {

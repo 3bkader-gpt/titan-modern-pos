@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { QuickReturnModal } from '../components/pos/QuickReturnModal';
 import { ManagerOverrideModal } from '../components/auth/ManagerOverrideModal';
+import { ExportExcelButton } from '../components/common/ExportExcelButton';
 
 type DateRangeFilter = 'today' | 'yesterday' | 'week' | 'all';
 
@@ -298,6 +299,25 @@ export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUse
               <span>تعديل الفاتورة (نفس اليوم)</span>
             </button>
           )}
+
+          <ExportExcelButton
+            fileNamePrefix="سجل_فواتير_المبيعات"
+            disabled={filteredInvoices.length === 0}
+            headers={['رقم الفاتورة', 'التاريخ', 'الوقت', 'عدد الأصناف', 'الإجمالي', 'الخصم', 'طريقة الدفع', 'الكاشير', 'العميل']}
+            getRows={() =>
+              filteredInvoices.map((inv) => [
+                inv.invoice_number,
+                inv.invoice_date,
+                inv.invoice_time,
+                inv.item_count,
+                inv.total_selling_price,
+                inv.discount || 0,
+                inv.payment_method || 'نقدي',
+                inv.cashier_name || '',
+                inv.client_name || ''
+              ])
+            }
+          />
 
           <button
             type="button"

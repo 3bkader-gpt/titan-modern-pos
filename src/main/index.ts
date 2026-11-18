@@ -59,7 +59,8 @@ import {
   addItemBarcode,
   removeItemBarcode,
   ensureItemHasBarcode,
-  advancedSearchItems
+  advancedSearchItems,
+  matchImportedPurchaseRows
 } from './db';
 import { 
   performBackup, 
@@ -420,6 +421,14 @@ function registerIpcHandlers() {
   ipcMain.handle('db:advancedSearchItems', async (_event, filter: Record<string, unknown>) => {
     return advancedSearchItems(filter);
   });
+
+  // Module 7: Excel/CSV Import Smart Row Matching Handler
+  ipcMain.handle(
+    'purchase:matchImportedRows',
+    async (_event, rows: Parameters<typeof matchImportedPurchaseRows>[0], supplierId?: number, columnMapJson?: string) => {
+      return matchImportedPurchaseRows(rows, supplierId, columnMapJson);
+    }
+  );
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
