@@ -33,7 +33,11 @@ import {
   StagnantItem,
   StockValuationReport,
   NearExpiryItem,
+  UserRole,
   UserAccount,
+  AuthSession,
+  LoginAuditEntry,
+  SaveUserPayload,
   AuditLogs,
   LedgerIntegrityStatus
 } from '../shared/types';
@@ -198,6 +202,30 @@ function ensureSchemaUpgrades(database: Database.Database) {
     database.exec('CREATE INDEX IF NOT EXISTS idx_cust_ledger_cust_id ON customer_ledger(customer_id);');
     database.exec('CREATE INDEX IF NOT EXISTS idx_supp_trans_supp_id ON supplier_transactions(supplier_id);');
 
+    // M1: RBAC Users, Pins & Login Audit Trail
+    safeAddColumn('users', "pin_code TEXT DEFAULT ''");
+    safeAddColumn('users', "role TEXT DEFAULT 'CASHIER'");
+    safeAddColumn('users', `allowed_tabs TEXT DEFAULT '["pos","sales_invoices","shortages"]'`);
+    safeAddColumn('users', "badge_barcode TEXT DEFAULT ''");
+    safeAddColumn('users', 'max_discount_pct REAL DEFAULT 0');
+    safeAddColumn('users', 'commission_pct REAL DEFAULT 0');
+    safeAddColumn('sales_invoices', 'user_id INTEGER DEFAULT 99');
+    safeAddColumn('sales_invoices', "cashier_name TEXT DEFAULT 'د. مريم الحميلي'");
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS login_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        authorized_by_id INTEGER DEFAULT NULL,
+        authorized_by_name TEXT DEFAULT '',
+        target_ref TEXT DEFAULT '',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_login_audit_date ON login_audit_log(created_at);
+    `);
+
     // Ensure Dr. Mariam Elhomeily account exists in users table
     const existingDoctor = database.prepare("SELECT * FROM users WHERE user_name LIKE '%مريم%' OR user_name LIKE '%الحميلي%'").get();
     if (!existingDoctor) {
@@ -207,6 +235,26 @@ function ensureSchemaUpgrades(database: Database.Database) {
         VALUES (?, 'د. مريم الحميلي', 1, 8224)
       `).run(maxUser.maxId + 1);
     }
+
+    // Idempotent legacy Titan-3 users cleanup (\x0f removal & active defaults)
+    database.exec(`
+      UPDATE users SET user_name = TRIM(REPLACE(user_name, char(15), '')) WHERE instr(user_name, char(15)) > 0;
+      DELETE FROM users WHERE user_id BETWEEN 5 AND 98 AND (user_name IS NULL OR TRIM(user_name) = '');
+      UPDATE users SET is_active = 1, role = 'ADMIN', pin_code = '1989',
+        allowed_tabs = '["dashboard","pos","sales_invoices","catalog","purchases","shortages","treasury","reports"]',
+        max_discount_pct = 100, badge_barcode = 'EMP-' || user_id
+        WHERE user_id IN (2, 99) AND (pin_code IS NULL OR pin_code = '');
+      UPDATE users SET is_active = 1, role = 'PHARMACIST', pin_code = '1111',
+        allowed_tabs = '["pos","sales_invoices","catalog","purchases","shortages"]',
+        max_discount_pct = 10, badge_barcode = 'EMP-3'
+        WHERE user_id = 3 AND (pin_code IS NULL OR pin_code = '');
+      UPDATE users SET is_active = 1, role = 'CASHIER', pin_code = '2222',
+        allowed_tabs = '["pos","sales_invoices","shortages"]',
+        max_discount_pct = 3, badge_barcode = 'EMP-4'
+        WHERE user_id = 4 AND (pin_code IS NULL OR pin_code = '');
+      UPDATE users SET is_active = 0, role = 'ADMIN', pin_code = '9999', badge_barcode = 'EMP-1'
+        WHERE user_id = 1 AND (pin_code IS NULL OR pin_code = '');
+    `);
   } catch {
     // Indexes exist or table locked
   }
@@ -813,12 +861,18 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
     const change = Math.max(0, Math.round((paid - netTotal) * 100) / 100);
 
     // 3. Insert sales_invoices Header
+    const cashierId = payload.user_id && payload.user_id > 0 ? payload.user_id : 99;
+    const cashierName = payload.cashier_name && payload.cashier_name.trim()
+      ? payload.cashier_name.trim()
+      : 'د. مريم الحميلي';
+
     database.prepare(`
       INSERT INTO sales_invoices (
         invoice_number, invoice_date, invoice_time, item_count,
         total_selling_price, total_cost_price, profit, year,
-        discount, payment_method, client_name, client_phone, client_address, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        discount, payment_method, client_name, client_phone, client_address, notes,
+        user_id, cashier_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       invoiceNumber,
       invoiceDate,
@@ -833,7 +887,9 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
       payload.client_name || '',
       payload.client_phone || '',
       payload.client_address || '',
-      payload.notes || ''
+      payload.notes || '',
+      cashierId,
+      cashierName
     );
 
     // 4. Insert items, deduct stock, feed shortages_drafts
@@ -3094,7 +3150,7 @@ export function getUsersAndAuditLogs(limit = 50): {
   const database = getDatabaseInstance();
 
   const users = database.prepare(`
-    SELECT user_id, user_name, is_active, permissions_mask
+    SELECT user_id, user_name, is_active, permissions_mask, role, allowed_tabs, badge_barcode, max_discount_pct, commission_pct
     FROM users
     ORDER BY is_active DESC, user_id ASC
   `).all() as UserAccount[];
@@ -3160,6 +3216,279 @@ export function getUsersAndAuditLogs(limit = 50): {
     }
   };
 }
+
+// ============================================================================
+// MODULE 1: RBAC LOGIN, MANAGER ELEVATION & USER ACCOUNT MANAGEMENT
+// ============================================================================
+
+const DEFAULT_TABS_BY_ROLE: Record<UserRole, string[]> = {
+  ADMIN: ['dashboard', 'pos', 'sales_invoices', 'catalog', 'purchases', 'shortages', 'treasury', 'reports'],
+  PHARMACIST: ['pos', 'sales_invoices', 'catalog', 'purchases', 'shortages'],
+  CASHIER: ['pos', 'sales_invoices', 'shortages']
+};
+
+const DEFAULT_DISCOUNT_BY_ROLE: Record<UserRole, number> = {
+  ADMIN: 100,
+  PHARMACIST: 10,
+  CASHIER: 3
+};
+
+function normalizeUserRole(raw?: string | null): UserRole {
+  if (raw === 'ADMIN' || raw === 'PHARMACIST' || raw === 'CASHIER') {
+    return raw;
+  }
+  return 'CASHIER';
+}
+
+function parseAllowedTabs(rawTabs: string | null | undefined, role: UserRole): string[] {
+  if (rawTabs) {
+    try {
+      const parsed = JSON.parse(rawTabs);
+      if (Array.isArray(parsed) && parsed.every((t) => typeof t === 'string')) {
+        return parsed;
+      }
+    } catch {
+      // Fallback to role defaults
+    }
+  }
+  return [...DEFAULT_TABS_BY_ROLE[role]];
+}
+
+function recordLoginAuditEvent(
+  database: Database.Database,
+  entry: {
+    user_id: number;
+    user_name: string;
+    action_type: LoginAuditEntry['action_type'];
+    authorized_by_id?: number | null;
+    authorized_by_name?: string;
+    target_ref?: string;
+  }
+): void {
+  const { timestamp } = getLocalDateTime();
+  database.prepare(`
+    INSERT INTO login_audit_log (
+      user_id, user_name, action_type, authorized_by_id, authorized_by_name, target_ref, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    entry.user_id,
+    entry.user_name,
+    entry.action_type,
+    entry.authorized_by_id ?? null,
+    entry.authorized_by_name || '',
+    entry.target_ref || '',
+    timestamp
+  );
+}
+
+/**
+ * Return active user accounts (safe projection excluding PIN codes).
+ */
+export function listActiveUsers(): UserAccount[] {
+  const database = getDatabaseInstance();
+  return database.prepare(`
+    SELECT user_id, user_name, is_active, permissions_mask, role, allowed_tabs, badge_barcode, max_discount_pct, commission_pct
+    FROM users
+    WHERE is_active = 1
+    ORDER BY
+      CASE role WHEN 'ADMIN' THEN 1 WHEN 'PHARMACIST' THEN 2 ELSE 3 END ASC,
+      user_id ASC
+  `).all() as UserAccount[];
+}
+
+/**
+ * Authenticate user by user_id or badge_barcode and PIN code.
+ */
+export function authenticateUser(userIdOrBadge: number | string, pinCode: string): AuthSession {
+  const database = getDatabaseInstance();
+  const key = String(userIdOrBadge ?? '').trim();
+  const cleanPin = String(pinCode ?? '').trim();
+
+  if (!key) {
+    throw new Error('يرجى اختيار المستخدم أو مسح باركود الكارنيه.');
+  }
+
+  let userRow: (UserAccount & { pin_code?: string }) | undefined;
+  if (/^\d+$/.test(key)) {
+    userRow = database.prepare(`
+      SELECT user_id, user_name, is_active, permissions_mask, role, allowed_tabs, badge_barcode, max_discount_pct, commission_pct, pin_code
+      FROM users WHERE user_id = ? AND is_active = 1 LIMIT 1
+    `).get(parseInt(key, 10)) as (UserAccount & { pin_code?: string }) | undefined;
+  }
+  if (!userRow) {
+    userRow = database.prepare(`
+      SELECT user_id, user_name, is_active, permissions_mask, role, allowed_tabs, badge_barcode, max_discount_pct, commission_pct, pin_code
+      FROM users WHERE UPPER(badge_barcode) = UPPER(?) AND is_active = 1 LIMIT 1
+    `).get(key) as (UserAccount & { pin_code?: string }) | undefined;
+  }
+
+  if (!userRow) {
+    throw new Error('المستخدم غير موجود أو غير نشط.');
+  }
+
+  const storedPin = String(userRow.pin_code || '').trim();
+  if (!cleanPin || cleanPin !== storedPin) {
+    recordLoginAuditEvent(database, {
+      user_id: userRow.user_id,
+      user_name: userRow.user_name,
+      action_type: 'FAILED_PIN',
+      target_ref: 'LOGIN'
+    });
+    throw new Error('كود الدخول (PIN) غير صحيح.');
+  }
+
+  const role = normalizeUserRole(userRow.role);
+  const allowedTabs = parseAllowedTabs(userRow.allowed_tabs, role);
+  const { timestamp } = getLocalDateTime();
+
+  recordLoginAuditEvent(database, {
+    user_id: userRow.user_id,
+    user_name: userRow.user_name,
+    action_type: 'LOGIN'
+  });
+
+  return {
+    user_id: userRow.user_id,
+    user_name: userRow.user_name,
+    role,
+    allowed_tabs: allowedTabs,
+    max_discount_pct: Number(userRow.max_discount_pct ?? DEFAULT_DISCOUNT_BY_ROLE[role]),
+    badge_barcode: userRow.badge_barcode || `EMP-${userRow.user_id}`,
+    logged_in_at: timestamp
+  };
+}
+
+/**
+ * Authorize a single privileged operation ("الدخول كمدير") without logging out the current cashier.
+ */
+export function verifyManagerOverride(
+  pinCode: string,
+  currentUserId: number,
+  actionLabel: string,
+  targetRef: string = ''
+): { ok: boolean; managerId: number; managerName: string } {
+  const database = getDatabaseInstance();
+  const cleanPin = String(pinCode ?? '').trim();
+  const requester = database
+    .prepare('SELECT user_id, user_name FROM users WHERE user_id = ?')
+    .get(currentUserId) as { user_id: number; user_name: string } | undefined;
+
+  if (!cleanPin) {
+    throw new Error('يرجى إدخال الرقم السري للمدير.');
+  }
+
+  const manager = database.prepare(`
+    SELECT user_id, user_name
+    FROM users
+    WHERE is_active = 1 AND role = 'ADMIN' AND pin_code = ?
+    ORDER BY user_id ASC
+    LIMIT 1
+  `).get(cleanPin) as { user_id: number; user_name: string } | undefined;
+
+  if (!manager) {
+    recordLoginAuditEvent(database, {
+      user_id: requester?.user_id || currentUserId || 0,
+      user_name: requester?.user_name || 'غير معروف',
+      action_type: 'FAILED_PIN',
+      target_ref: `OVERRIDE:${actionLabel}${targetRef ? ` (${targetRef})` : ''}`
+    });
+    throw new Error('كود المدير غير صحيح أو لا يملك صلاحية الإدارة.');
+  }
+
+  recordLoginAuditEvent(database, {
+    user_id: requester?.user_id || currentUserId || 0,
+    user_name: requester?.user_name || manager.user_name,
+    action_type: 'MANAGER_OVERRIDE',
+    authorized_by_id: manager.user_id,
+    authorized_by_name: manager.user_name,
+    target_ref: `${actionLabel}${targetRef ? ` (${targetRef})` : ''}`
+  });
+
+  return {
+    ok: true,
+    managerId: manager.user_id,
+    managerName: manager.user_name
+  };
+}
+
+/**
+ * Create or update a pharmacy staff account (Admin management).
+ */
+export function saveOrUpdateUserAccount(payload: SaveUserPayload): UserAccount {
+  const database = getDatabaseInstance();
+  const name = (payload.user_name || '').trim();
+  if (!name) {
+    throw new Error('اسم المستخدم مطلوب.');
+  }
+
+  const role = normalizeUserRole(payload.role);
+  const tabsJson = JSON.stringify(
+    payload.allowed_tabs && payload.allowed_tabs.length > 0
+      ? payload.allowed_tabs
+      : DEFAULT_TABS_BY_ROLE[role]
+  );
+  const maxDisc = payload.max_discount_pct ?? DEFAULT_DISCOUNT_BY_ROLE[role];
+  const commissionPct = Math.max(0, Number(payload.commission_pct ?? 0));
+  const isActive = payload.is_active === 0 ? 0 : 1;
+
+  if (payload.user_id && payload.user_id > 0) {
+    const existing = database.prepare('SELECT user_id, pin_code, badge_barcode FROM users WHERE user_id = ?').get(payload.user_id) as {
+      user_id: number;
+      pin_code?: string;
+      badge_barcode?: string;
+    } | undefined;
+    if (!existing) {
+      throw new Error(`المستخدم رقم #${payload.user_id} غير موجود.`);
+    }
+
+    const nextPin = payload.pin_code && payload.pin_code.trim() ? payload.pin_code.trim() : (existing.pin_code || '1234');
+    const nextBadge = existing.badge_barcode && existing.badge_barcode.trim()
+      ? existing.badge_barcode
+      : `EMP-${payload.user_id}`;
+
+    database.prepare(`
+      UPDATE users
+      SET user_name = ?, pin_code = ?, role = ?, allowed_tabs = ?, badge_barcode = ?, max_discount_pct = ?, commission_pct = ?, is_active = ?
+      WHERE user_id = ?
+    `).run(name, nextPin, role, tabsJson, nextBadge, maxDisc, commissionPct, isActive, payload.user_id);
+
+    return database.prepare(`
+      SELECT user_id, user_name, is_active, permissions_mask, role, allowed_tabs, badge_barcode, max_discount_pct, commission_pct
+      FROM users WHERE user_id = ?
+    `).get(payload.user_id) as UserAccount;
+  }
+
+  const cleanPin = (payload.pin_code || '').trim();
+  if (!cleanPin || cleanPin.length < 4) {
+    throw new Error('كود الدخول (PIN) يجب أن يكون 4 أرقام على الأقل.');
+  }
+
+  const maxRow = database.prepare('SELECT COALESCE(MAX(user_id), 0) as maxId FROM users').get() as { maxId: number };
+  const newId = maxRow.maxId + 1;
+  const badge = `EMP-${newId}`;
+
+  database.prepare(`
+    INSERT INTO users (
+      user_id, user_name, is_active, permissions_mask, pin_code, role, allowed_tabs, badge_barcode, max_discount_pct, commission_pct
+    ) VALUES (?, ?, ?, 8224, ?, ?, ?, ?, ?, ?)
+  `).run(newId, name, isActive, cleanPin, role, tabsJson, badge, maxDisc, commissionPct);
+
+  return database.prepare(`
+    SELECT user_id, user_name, is_active, permissions_mask, role, allowed_tabs, badge_barcode, max_discount_pct, commission_pct
+    FROM users WHERE user_id = ?
+  `).get(newId) as UserAccount;
+}
+
+export function getLoginAuditLogs(limit: number = 100): LoginAuditEntry[] {
+  const database = getDatabaseInstance();
+  return database.prepare(`
+    SELECT id, user_id, user_name, action_type, authorized_by_id, authorized_by_name, target_ref, created_at
+    FROM login_audit_log
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(limit) as LoginAuditEntry[];
+}
+
 
 
 

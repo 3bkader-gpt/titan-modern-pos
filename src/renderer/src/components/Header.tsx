@@ -7,16 +7,20 @@ import {
   Usb, 
   RefreshCw,
   Pill,
-  FolderOpen
+  FolderOpen,
+  UserCheck,
+  ArrowLeftRight
 } from 'lucide-react';
-import { DashboardStats, BackupStatus, StorageInfo } from '../../../shared/types';
+import { DashboardStats, BackupStatus, StorageInfo, AuthSession } from '../../../shared/types';
 
 interface HeaderProps {
   stats: DashboardStats | null;
   backupStatus: BackupStatus | null;
   storageInfo?: StorageInfo | null;
+  currentUser?: AuthSession | null;
   onTriggerBackup: () => void;
   onOpenStorageModal: () => void;
+  onSwitchUser?: () => void;
   isBackingUp: boolean;
 }
 
@@ -24,8 +28,10 @@ export const Header: React.FC<HeaderProps> = ({
   stats,
   backupStatus,
   storageInfo,
+  currentUser,
   onTriggerBackup,
   onOpenStorageModal,
+  onSwitchUser,
   isBackingUp
 }) => {
   const [currentTime, setCurrentTime] = useState<string>('');
@@ -98,23 +104,52 @@ export const Header: React.FC<HeaderProps> = ({
         </span>
       </div>
 
-      {/* Right: Cash Drawer, Invoice, USB Backup */}
+      {/* Right: User, Cash Drawer, Invoice, USB Backup */}
       <div className="flex items-center gap-2.5">
-        {/* Treasury Safe */}
-        <div
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg"
-          style={{
-            background: 'rgba(16,185,129,0.12)',
-            border: '1px solid rgba(16,185,129,0.25)'
-          }}
-        >
-          <Wallet className="w-4 h-4" style={{ color: '#10b981' }} />
-          <span className="text-xs font-medium text-white/70">الخزينة:</span>
-          <span className="font-mono text-sm font-bold" style={{ color: '#10b981' }} data-tabular>
-            {stats ? stats.cashBalance.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '—'}
-            <span className="text-xs font-sans font-normal mr-1 text-white/60">ج.م</span>
-          </span>
-        </div>
+        {currentUser && (
+          <div
+            className="flex items-center gap-2 px-2.5 py-1 rounded-lg text-xs font-sans"
+            style={{
+              background: 'rgba(255,255,255,0.06)',
+              border: '1px solid rgba(255,255,255,0.1)'
+            }}
+          >
+            <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="font-bold text-white max-w-[120px] truncate">{currentUser.user_name}</span>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-200">
+              {currentUser.role === 'ADMIN' ? 'مدير' : currentUser.role === 'PHARMACIST' ? 'صيدلي' : 'كاشير'}
+            </span>
+            {onSwitchUser && (
+              <button
+                type="button"
+                onClick={onSwitchUser}
+                title="تبديل المستخدم (Ctrl+L)"
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-[10px] font-bold text-emerald-200 transition-colors cursor-pointer"
+              >
+                <ArrowLeftRight className="w-3 h-3" />
+                <span>تبديل</span>
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Treasury Safe (hidden from CASHIER role) */}
+        {currentUser?.role !== 'CASHIER' && (
+          <div
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg"
+            style={{
+              background: 'rgba(16,185,129,0.12)',
+              border: '1px solid rgba(16,185,129,0.25)'
+            }}
+          >
+            <Wallet className="w-4 h-4" style={{ color: '#10b981' }} />
+            <span className="text-xs font-medium text-white/70">الخزينة:</span>
+            <span className="font-mono text-sm font-bold" style={{ color: '#10b981' }} data-tabular>
+              {stats ? stats.cashBalance.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '—'}
+              <span className="text-xs font-sans font-normal mr-1 text-white/60">ج.م</span>
+            </span>
+          </div>
+        )}
 
         {/* Last Invoice */}
         <div

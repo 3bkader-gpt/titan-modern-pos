@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { SalesInvoice, SalesInvoiceItem } from '../../../shared/types';
+import { SalesInvoice, SalesInvoiceItem, AuthSession } from '../../../shared/types';
 import {
   Receipt,
   Search,
@@ -16,6 +16,10 @@ import { QuickReturnModal } from '../components/pos/QuickReturnModal';
 
 type DateRangeFilter = 'today' | 'yesterday' | 'week' | 'all';
 
+interface SalesInvoicesViewProps {
+  currentUser?: AuthSession | null;
+}
+
 function getLocalDateStr(offsetDays: number = 0): string {
   const d = new Date();
   d.setDate(d.getDate() + offsetDays);
@@ -25,7 +29,8 @@ function getLocalDateStr(offsetDays: number = 0): string {
   return `${y}-${m}-${day}`;
 }
 
-export const SalesInvoicesView: React.FC = () => {
+export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUser }) => {
+  const isAdmin = !currentUser || currentUser.role === 'ADMIN';
   const [invoices, setInvoices] = useState<SalesInvoice[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -247,7 +252,7 @@ export const SalesInvoicesView: React.FC = () => {
       </div>
 
       {/* Summary Strip */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className={`grid gap-3 ${isAdmin ? 'grid-cols-3' : 'grid-cols-2'}`}>
         <div className="bg-white rounded-xl border border-slate-200 px-4 py-2.5 flex items-center justify-between">
           <span className="text-xs text-slate-500 font-medium">عدد الفواتير</span>
           <span className="text-sm font-mono font-bold text-slate-900">
@@ -260,27 +265,31 @@ export const SalesInvoicesView: React.FC = () => {
             {summary.totalSales.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م
           </span>
         </div>
-        <div className="bg-white rounded-xl border border-slate-200 px-4 py-2.5 flex items-center justify-between">
-          <span className="text-xs text-slate-500 font-medium flex items-center gap-1">
-            <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
-            <span>صافي الربح</span>
-          </span>
-          <span className="text-sm font-mono font-bold text-emerald-700">
-            {summary.totalProfit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م
-          </span>
-        </div>
+        {isAdmin && (
+          <div className="bg-white rounded-xl border border-slate-200 px-4 py-2.5 flex items-center justify-between">
+            <span className="text-xs text-slate-500 font-medium flex items-center gap-1">
+              <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+              <span>صافي الربح</span>
+            </span>
+            <span className="text-sm font-mono font-bold text-emerald-700">
+              {summary.totalProfit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ج.م
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Main Split View: Invoices List (Right) + Selected Invoice Details (Left) */}
       <div className="flex-1 grid grid-cols-12 gap-3 min-h-0">
         {/* Invoices Table */}
         <div className="col-span-12 lg:col-span-6 bg-white rounded-xl border border-slate-200 shadow-2xs flex flex-col overflow-hidden">
-          <div className="grid grid-cols-[72px_1fr_56px_88px_82px] gap-2 px-3 py-2.5 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-700">
+          <div className={`grid gap-2 px-3 py-2.5 bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-700 ${
+            isAdmin ? 'grid-cols-[72px_1fr_56px_88px_82px]' : 'grid-cols-[72px_1fr_56px_96px]'
+          }`}>
             <div>الفاتورة</div>
             <div>التاريخ والوقت</div>
             <div className="text-center">أصناف</div>
             <div className="text-left">الإجمالي</div>
-            <div className="text-left">الربح</div>
+            {isAdmin && <div className="text-left">الربح</div>}
           </div>
 
           <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
@@ -295,7 +304,9 @@ export const SalesInvoicesView: React.FC = () => {
                   <div
                     key={inv.invoice_number}
                     onClick={() => setSelectedInvoice(inv)}
-                    className={`grid grid-cols-[72px_1fr_56px_88px_82px] gap-2 px-3 py-2.5 text-xs items-center cursor-pointer transition-colors ${
+                    className={`grid gap-2 px-3 py-2.5 text-xs items-center cursor-pointer transition-colors ${
+                      isAdmin ? 'grid-cols-[72px_1fr_56px_88px_82px]' : 'grid-cols-[72px_1fr_56px_96px]'
+                    } ${
                       isSelected
                         ? 'bg-blue-50 border-r-4 border-r-blue-600 text-blue-950 font-bold'
                         : 'hover:bg-slate-50 text-slate-700'
@@ -321,9 +332,11 @@ export const SalesInvoicesView: React.FC = () => {
                     <div className="text-left font-mono font-bold text-slate-900">
                       {(inv.total_selling_price || 0).toFixed(2)}
                     </div>
-                    <div className="text-left font-mono text-emerald-700">
-                      +{(inv.profit || 0).toFixed(2)}
-                    </div>
+                    {isAdmin && (
+                      <div className="text-left font-mono text-emerald-700">
+                        +{(inv.profit || 0).toFixed(2)}
+                      </div>
+                    )}
                   </div>
                 );
               })
@@ -434,12 +447,16 @@ export const SalesInvoicesView: React.FC = () => {
                     <Package className="w-3.5 h-3.5" />
                     عدد الأصناف: <strong className="font-mono text-slate-900">{selectedItems.length}</strong>
                   </span>
-                  <span>
-                    التكلفة: <strong className="font-mono text-slate-900">{(selectedInvoice.total_cost_price || 0).toFixed(2)}</strong>
-                  </span>
-                  <span>
-                    الربح: <strong className="font-mono text-emerald-700">+{(selectedInvoice.profit || 0).toFixed(2)} ج.م</strong>
-                  </span>
+                  {isAdmin && (
+                    <>
+                      <span>
+                        التكلفة: <strong className="font-mono text-slate-900">{(selectedInvoice.total_cost_price || 0).toFixed(2)}</strong>
+                      </span>
+                      <span>
+                        الربح: <strong className="font-mono text-emerald-700">+{(selectedInvoice.profit || 0).toFixed(2)} ج.م</strong>
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
             </>

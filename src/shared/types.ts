@@ -38,6 +38,8 @@ export interface SalesInvoice {
   discount?: number;
   payment_method?: string;
   client_name?: string;
+  user_id?: number;
+  cashier_name?: string;
 }
 
 export interface SalesInvoiceItem {
@@ -112,6 +114,8 @@ export interface CreateSaleInvoicePayload {
   is_delivery?: boolean;
   notes?: string;
   paid_amount?: number;
+  user_id?: number;
+  cashier_name?: string;
 }
 
 export interface CreateSaleInvoiceResult {
@@ -445,11 +449,50 @@ export interface StockValuationReport {
   near_expiry_items: NearExpiryItem[];
 }
 
+export type UserRole = 'ADMIN' | 'PHARMACIST' | 'CASHIER';
+
 export interface UserAccount {
   user_id: number;
   user_name: string;
   is_active: number;
-  permissions_mask?: string;
+  permissions_mask?: number | string;
+  role?: UserRole;
+  allowed_tabs?: string;
+  badge_barcode?: string;
+  max_discount_pct?: number;
+  commission_pct?: number;
+}
+
+export interface AuthSession {
+  user_id: number;
+  user_name: string;
+  role: UserRole;
+  allowed_tabs: string[];
+  max_discount_pct: number;
+  badge_barcode: string;
+  logged_in_at: string;
+}
+
+export interface LoginAuditEntry {
+  id: number;
+  user_id: number;
+  user_name: string;
+  action_type: 'LOGIN' | 'LOGOUT' | 'SWITCH_USER' | 'MANAGER_OVERRIDE' | 'FAILED_PIN';
+  authorized_by_id?: number | null;
+  authorized_by_name?: string;
+  target_ref?: string;
+  created_at: string;
+}
+
+export interface SaveUserPayload {
+  user_id?: number;
+  user_name: string;
+  pin_code?: string;
+  role: UserRole;
+  allowed_tabs?: string[];
+  max_discount_pct?: number;
+  commission_pct?: number;
+  is_active?: number;
 }
 
 export interface AuditLogs {

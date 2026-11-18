@@ -11,10 +11,26 @@ import { TreasuryShiftsView } from './views/TreasuryShiftsView';
 import { ReportsAnalyticsView } from './views/ReportsAnalyticsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { DataLocationModal } from './components/DataLocationModal';
-import { DashboardStats, BackupStatus, StorageInfo } from '../../shared/types';
+import { LoginScreen } from './components/auth/LoginScreen';
+import { DashboardStats, BackupStatus, StorageInfo, AuthSession } from '../../shared/types';
 import { CheckCircle2, AlertCircle, X } from 'lucide-react';
 
+const AUTH_SESSION_STORAGE_KEY = 'titan_auth_session';
+
+function loadStoredAuthSession(): AuthSession | null {
+  try {
+    const raw = sessionStorage.getItem(AUTH_SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as AuthSession;
+    return parsed && typeof parsed.user_id === 'number' && parsed.role ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export const App: React.FC = () => {
+  const [currentUser, setCurrentUser] = useState<AuthSession | null>(() => loadStoredAuthSession());
+  const [showSwitchUserModal, setShowSwitchUserModal] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<NavTab>('pos');
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loadingStats, setLoadingStats] = useState<boolean>(true);
@@ -37,12 +53,43 @@ export const App: React.FC = () => {
     expiry_date?: string;
   }> | null>(null);
 
-  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'info') => {
+  const showToast = useCallback((message: string, type: 'success' | 'info' | 'error' = 'info') => {
     setToast({ message, type });
     setTimeout(() => {
       setToast(null);
     }, 4500);
-  };
+  }, []);
+
+  const canAccessTab = useCallback((tab: NavTab, session: AuthSession | null = currentUser): boolean => {
+    if (!session) return false;
+    if (session.role === 'ADMIN') return true;
+    return session.allowed_tabs.includes(tab);
+  }, [currentUser]);
+
+  const navigateToTab = useCallback((tab: NavTab) => {
+    if (!canAccessTab(tab, currentUser)) {
+      showToast('هذه الشاشة غير متاحة لصلاحيتك الحالية.', 'error');
+      return;
+    }
+    setActiveTab(tab);
+  }, [canAccessTab, currentUser, showToast]);
+
+  const handleLoginSuccess = useCallback((session: AuthSession) => {
+    try {
+      sessionStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(session));
+    } catch {
+      // Ignore storage quota errors
+    }
+    setCurrentUser(session);
+    setShowSwitchUserModal(false);
+    setActiveTab((prev) => {
+      if (session.role === 'ADMIN' || session.allowed_tabs.includes(prev)) {
+        return prev;
+      }
+      return (session.allowed_tabs[0] as NavTab) || 'pos';
+    });
+    showToast(`مرحباً ${session.user_name}`, 'success');
+  }, [showToast]);
 
   const loadStats = useCallback(async () => {
     try {
@@ -155,41 +202,50 @@ export const App: React.FC = () => {
     };
   }, [loadStats, loadBackupStatus, loadStorageInfo]);
 
-  // Global Keyboard Navigation (F1, F3-F7 & Esc)
+  // Global Keyboard Navigation (F1, F3-F7, Ctrl+L & Esc)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && (e.code === 'KeyL' || e.key.toLowerCase() === 'l')) {
+        e.preventDefault();
+        setShowSwitchUserModal(true);
+        return;
+      }
+
+      if (!currentUser || showSwitchUserModal) {
+        return;
+      }
+
       if (['F1', 'F3', 'F4', 'F5', 'F6', 'F7', 'F12'].includes(e.key)) {
         e.preventDefault();
       }
 
       switch (e.key) {
         case 'F1':
-          setActiveTab('pos');
+          navigateToTab('pos');
           break;
         case 'F2':
-          // F2 is dedicated to POS search: switch to POS if currently in another view
-          if (activeTab !== 'pos') {
+          if (activeTab !== 'pos' && canAccessTab('pos', currentUser)) {
             e.preventDefault();
-            setActiveTab('pos');
+            navigateToTab('pos');
           }
           break;
         case 'F3':
-          setActiveTab('purchases');
+          navigateToTab('purchases');
           break;
         case 'F4':
-          setActiveTab('shortages');
+          navigateToTab('shortages');
           break;
         case 'F5':
-          setActiveTab('treasury');
+          navigateToTab('treasury');
           break;
         case 'F6':
-          setActiveTab('reports');
+          navigateToTab('reports');
           break;
         case 'F7':
-          setActiveTab('catalog');
+          navigateToTab('catalog');
           break;
         case 'F12':
-          setActiveTab('sales_invoices');
+          navigateToTab('sales_invoices');
           break;
         case 'Escape': {
           if (e.defaultPrevented) break;
@@ -197,7 +253,7 @@ export const App: React.FC = () => {
           const target = e.target as HTMLElement | null;
           if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) break;
           if (activeTab !== 'pos' && activeTab !== 'dashboard') {
-            setActiveTab('pos');
+            navigateToTab('pos');
           }
           break;
         }
@@ -206,7 +262,7 @@ export const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeTab]);
+  }, [activeTab, currentUser, showSwitchUserModal, canAccessTab, navigateToTab]);
 
   return (
     <div className="h-screen w-screen flex flex-col bg-[#f1f5f9] text-slate-800 overflow-hidden font-sans select-none">
@@ -215,40 +271,42 @@ export const App: React.FC = () => {
         stats={stats}
         backupStatus={backupStatus}
         storageInfo={storageInfo}
+        currentUser={currentUser}
         onTriggerBackup={handleTriggerBackup}
         onOpenStorageModal={() => {
           setIsFirstRunStorageSetup(false);
           void loadStorageInfo(false);
           setIsStorageModalOpen(true);
         }}
+        onSwitchUser={() => setShowSwitchUserModal(true)}
         isBackingUp={isBackingUp}
       />
 
       {/* 2. Main Clinical Workspace Layout */}
       <div className="flex-1 flex overflow-hidden">
         {/* Navigation Sidebar */}
-        <Navigation activeTab={activeTab} onSelectTab={setActiveTab} />
+        <Navigation activeTab={activeTab} onSelectTab={navigateToTab} currentUser={currentUser} />
 
         {/* Content Rail */}
         <main className="flex-1 overflow-y-auto p-4 bg-[#f1f5f9]">
           <div className="max-w-[1700px] mx-auto">
             {/* POS View is kept mounted so active invoices, cart tabs & focus are strictly preserved */}
             <div className={activeTab === 'pos' ? 'block' : 'hidden'}>
-              <ErrorBoundary fallbackTab={() => setActiveTab('pos')}>
-                <PosView />
+              <ErrorBoundary fallbackTab={() => navigateToTab('pos')}>
+                <PosView currentUser={currentUser} />
               </ErrorBoundary>
             </div>
 
-            <ErrorBoundary key={activeTab} fallbackTab={() => setActiveTab('pos')}>
-              {activeTab === 'dashboard' && (
+            <ErrorBoundary key={activeTab} fallbackTab={() => navigateToTab('pos')}>
+              {activeTab === 'dashboard' && canAccessTab('dashboard', currentUser) && (
                 <DashboardView stats={stats} loadingStats={loadingStats} />
               )}
 
-              {activeTab === 'sales_invoices' && <SalesInvoicesView />}
+              {activeTab === 'sales_invoices' && <SalesInvoicesView currentUser={currentUser} />}
 
-              {activeTab === 'catalog' && <CatalogInventoryView />}
+              {activeTab === 'catalog' && canAccessTab('catalog', currentUser) && <CatalogInventoryView />}
 
-              {activeTab === 'purchases' && (
+              {activeTab === 'purchases' && canAccessTab('purchases', currentUser) && (
                 <PurchasesView
                   initialDraftItems={pendingPurchaseDraft || undefined}
                   onClearInitialDraft={() => setPendingPurchaseDraft(null)}
@@ -261,13 +319,22 @@ export const App: React.FC = () => {
                 />
               )}
 
-              {activeTab === 'treasury' && <TreasuryShiftsView />}
+              {activeTab === 'treasury' && canAccessTab('treasury', currentUser) && <TreasuryShiftsView />}
 
-              {activeTab === 'reports' && <ReportsAnalyticsView />}
+              {activeTab === 'reports' && canAccessTab('reports', currentUser) && <ReportsAnalyticsView />}
             </ErrorBoundary>
           </div>
         </main>
       </div>
+
+      {/* RBAC Login / User Switch Modal */}
+      {(!currentUser || showSwitchUserModal) && (
+        <LoginScreen
+          onLoginSuccess={handleLoginSuccess}
+          canCancel={!!currentUser}
+          onCancelSwitch={() => setShowSwitchUserModal(false)}
+        />
+      )}
 
       {/* Data Storage Location Modal */}
       <DataLocationModal

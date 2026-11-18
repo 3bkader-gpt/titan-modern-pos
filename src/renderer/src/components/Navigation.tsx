@@ -10,11 +10,14 @@ import {
   LayoutDashboard
 } from 'lucide-react';
 
+import { AuthSession } from '../../../shared/types';
+
 export type NavTab = 'dashboard' | 'pos' | 'sales_invoices' | 'catalog' | 'purchases' | 'shortages' | 'treasury' | 'reports';
 
 interface NavigationProps {
   activeTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
+  currentUser?: AuthSession | null;
 }
 
 interface NavItem {
@@ -76,7 +79,12 @@ export const navItems: NavItem[] = [
   }
 ];
 
-export const Navigation: React.FC<NavigationProps> = ({ activeTab, onSelectTab }) => {
+export const Navigation: React.FC<NavigationProps> = ({ activeTab, onSelectTab, currentUser }) => {
+  const visibleNavItems = navItems.filter((item) => {
+    if (!currentUser || currentUser.role === 'ADMIN') return true;
+    return currentUser.allowed_tabs.includes(item.id);
+  });
+
   return (
     <nav className="w-56 flex flex-col shrink-0 select-none font-sans"
       style={{ background: '#0f172a' }}>
@@ -99,7 +107,7 @@ export const Navigation: React.FC<NavigationProps> = ({ activeTab, onSelectTab }
           القوائم الرئيسية
         </div>
 
-        {navItems.map((item) => {
+        {visibleNavItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
 

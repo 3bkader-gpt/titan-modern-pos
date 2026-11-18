@@ -33,7 +33,10 @@ import {
   AuditLogs,
   LedgerIntegrityStatus,
   StorageInfo,
-  ChangeDataDirResult
+  ChangeDataDirResult,
+  AuthSession,
+  LoginAuditEntry,
+  SaveUserPayload
 } from '../shared/types';
 
 export const electronAPI = {
@@ -187,7 +190,23 @@ export const electronAPI = {
     ipcRenderer.invoke('storage:confirmCurrent'),
 
   openDataDirectory: (): Promise<{ success: boolean }> =>
-    ipcRenderer.invoke('storage:openInExplorer')
+    ipcRenderer.invoke('storage:openInExplorer'),
+
+  // Module 1: RBAC Authentication & Manager Elevation APIs
+  listActiveUsers: (): Promise<UserAccount[]> =>
+    ipcRenderer.invoke('auth:listActiveUsers'),
+
+  authenticateUser: (userIdOrBadge: number | string, pinCode: string): Promise<AuthSession> =>
+    ipcRenderer.invoke('auth:login', userIdOrBadge, pinCode),
+
+  verifyManagerOverride: (pinCode: string, currentUserId: number, actionLabel: string, targetRef?: string): Promise<{ ok: boolean; managerId: number; managerName: string }> =>
+    ipcRenderer.invoke('auth:verifyManagerOverride', pinCode, currentUserId, actionLabel, targetRef),
+
+  saveOrUpdateUserAccount: (payload: SaveUserPayload): Promise<UserAccount> =>
+    ipcRenderer.invoke('auth:saveUser', payload),
+
+  getLoginAuditLogs: (limit?: number): Promise<LoginAuditEntry[]> =>
+    ipcRenderer.invoke('auth:getLoginAuditLogs', limit)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

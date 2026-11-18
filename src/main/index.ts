@@ -41,7 +41,12 @@ import {
   getFinancialReport,
   getTopMovingAndStagnantItems,
   getExpiryAndStockValuationReport,
-  getUsersAndAuditLogs
+  getUsersAndAuditLogs,
+  listActiveUsers,
+  authenticateUser,
+  verifyManagerOverride,
+  saveOrUpdateUserAccount,
+  getLoginAuditLogs
 } from './db';
 import { 
   performBackup, 
@@ -63,7 +68,8 @@ import {
   InventoryFilterType,
   SaveItemPayload,
   CreatePurchaseInvoicePayload,
-  RecordTreasuryTransactionPayload
+  RecordTreasuryTransactionPayload,
+  SaveUserPayload
 } from '../shared/types';
 
 import fs from 'fs';
@@ -312,6 +318,27 @@ function registerIpcHandlers() {
 
   ipcMain.handle('storage:openInExplorer', async () => {
     return openDataDirectoryInExplorer();
+  });
+
+  // Module 1: RBAC Authentication & Manager Elevation Handlers
+  ipcMain.handle('auth:listActiveUsers', async () => {
+    return listActiveUsers();
+  });
+
+  ipcMain.handle('auth:login', async (_event, userIdOrBadge: number | string, pinCode: string) => {
+    return authenticateUser(userIdOrBadge, pinCode);
+  });
+
+  ipcMain.handle('auth:verifyManagerOverride', async (_event, pinCode: string, currentUserId: number, actionLabel: string, targetRef?: string) => {
+    return verifyManagerOverride(pinCode, currentUserId, actionLabel, targetRef);
+  });
+
+  ipcMain.handle('auth:saveUser', async (_event, payload: SaveUserPayload) => {
+    return saveOrUpdateUserAccount(payload);
+  });
+
+  ipcMain.handle('auth:getLoginAuditLogs', async (_event, limit?: number) => {
+    return getLoginAuditLogs(limit);
   });
 }
 

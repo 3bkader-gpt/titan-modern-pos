@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Item, CreateSaleItemPayload, CreateSaleInvoicePayload, CreateSaleInvoiceResult, ReturnSaleInvoiceResult } from '../../../shared/types';
+import { Item, CreateSaleItemPayload, CreateSaleInvoicePayload, CreateSaleInvoiceResult, ReturnSaleInvoiceResult, AuthSession } from '../../../shared/types';
 import { PosSearchInput } from '../components/pos/PosSearchInput';
 import { PosCartTable } from '../components/pos/PosCartTable';
 import { PosCheckoutPanel } from '../components/pos/PosCheckoutPanel';
@@ -30,7 +30,11 @@ interface ActiveCartTab {
 
 const MAX_TABS = 5;
 
-export const PosView: React.FC = () => {
+interface PosViewProps {
+  currentUser?: AuthSession | null;
+}
+
+export const PosView: React.FC<PosViewProps> = ({ currentUser }) => {
   // 1. Multi-Tab Carts State
   const [tabs, setTabs] = useState<ActiveCartTab[]>([
     {
@@ -473,7 +477,9 @@ export const PosView: React.FC = () => {
         client_phone: currentTab.clientPhone,
         client_address: currentTab.clientAddress,
         is_delivery: currentTab.paymentMethod === 'دليفري',
-        paid_amount: paid
+        paid_amount: paid,
+        user_id: currentUser?.user_id,
+        cashier_name: currentUser?.user_name
       };
 
       if (window.electronAPI) {
