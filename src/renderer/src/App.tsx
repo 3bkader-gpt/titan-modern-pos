@@ -345,7 +345,9 @@ export const App: React.FC = () => {
                 />
               )}
 
-              {activeTab === 'catalog' && canAccessTab('catalog', currentUser) && <CatalogInventoryView />}
+              {activeTab === 'catalog' && canAccessTab('catalog', currentUser) && (
+                <CatalogInventoryView currentUser={currentUser} />
+              )}
 
               {activeTab === 'purchases' && canAccessTab('purchases', currentUser) && (
                 <PurchasesView

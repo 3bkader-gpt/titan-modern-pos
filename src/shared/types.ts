@@ -27,6 +27,7 @@ export interface Item {
   min_stock?: number;
   max_stock?: number;
   auto_reorder?: number;
+  shelf_location?: string | null;
 }
 
 export type SearchScope = 'ALL' | 'OUR_LIST' | 'IN_STOCK';
@@ -489,6 +490,88 @@ export interface SaveItemPayload {
   min_stock?: number;
   max_stock?: number;
   auto_reorder?: number;
+  shelf_location?: string | null;
+}
+
+export interface StocktakeSessionRecord {
+  session_id: number;
+  scope_label: string;
+  status: string;
+  user_id: number;
+  user_name: string;
+  total_variance_cost: number;
+  created_at: string;
+  posted_at: string;
+}
+
+export interface StocktakeLineInput {
+  itemId: number;
+  countedQty: number;
+}
+
+export interface PostStocktakeSessionPayload {
+  scopeLabel: string;
+  userId: number;
+  userName: string;
+  lines: StocktakeLineInput[];
+}
+
+export interface PostStocktakeSessionResult {
+  session_id: number;
+  scope_label: string;
+  lines_count: number;
+  total_variance_qty: number;
+  total_variance_cost: number;
+  gl_account: string;
+  posted_at: string;
+}
+
+export interface ExpiryRiskItem {
+  item_id: number;
+  item_name_en: string;
+  item_name_ar?: string;
+  shelf_location?: string;
+  expiry_date: string;
+  current_stock: number;
+  buy_price: number;
+  consumer_price: number;
+  days_to_expiry: number;
+  daily_velocity: number;
+  expected_sold_before_expiry: number;
+  at_risk_qty: number;
+  at_risk_cost_egp: number;
+}
+
+export interface MergeItemsResult {
+  primary_item_id: number;
+  duplicate_item_id: number;
+  duplicate_item_name: string;
+  moved_stock: number;
+  sales_lines_moved: number;
+  purchase_lines_moved: number;
+  barcodes_moved: number;
+  merged_at: string;
+}
+
+export interface DuplicateCandidatePair {
+  primary_item_id: number;
+  primary_name: string;
+  primary_stock: number;
+  primary_barcode?: string;
+  duplicate_item_id: number;
+  duplicate_name: string;
+  duplicate_stock: number;
+  duplicate_barcode?: string;
+  match_reason: 'SAME_NAME' | 'SAME_BARCODE';
+}
+
+export interface StockAndLedgerAuditReport {
+  inventory_items_cost_total: number;
+  gl_inventory_balance: number;
+  inventory_gl_diff: number;
+  negative_stock_items: Array<{ item_id: number; item_name_en: string; current_stock: number }>;
+  below_cost_items: Array<{ item_id: number; item_name_en: string; buy_price: number; consumer_price: number }>;
+  gl_integrity: LedgerIntegrityStatus;
 }
 
 export interface SmartShortageFilter {

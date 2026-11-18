@@ -64,7 +64,15 @@ import {
   getSmartShortages,
   getItemVelocityAndBestSupplier,
   updateItemStockThresholds,
-  autoSuggestMinMaxFromSales
+  autoSuggestMinMaxFromSales,
+  updateItemShelfLocation,
+  getShelfItemsForStocktake,
+  getStocktakeSessions,
+  createAndPostStocktakeSession,
+  getExpiryRiskReport,
+  findDuplicateItemCandidates,
+  mergeDuplicateItems,
+  runStockAndLedgerIntegrityAudit
 } from './db';
 import { 
   performBackup, 
@@ -449,6 +457,39 @@ function registerIpcHandlers() {
 
   ipcMain.handle('inv:autoSuggestThresholds', async (_event, days?: number) => {
     return autoSuggestMinMaxFromSales(days);
+  });
+
+  // Module 9: Shelf Stocktake, Velocity Expiry Risk, Duplicate Merge & Integrity Handlers
+  ipcMain.handle('inv:updateShelfLocation', async (_event, itemId: number, shelfLocation: string) => {
+    return updateItemShelfLocation(itemId, shelfLocation);
+  });
+
+  ipcMain.handle('stocktake:getShelfItems', async (_event, shelfFilter?: string, limit?: number) => {
+    return getShelfItemsForStocktake(shelfFilter, limit);
+  });
+
+  ipcMain.handle('stocktake:getSessions', async (_event, limit?: number) => {
+    return getStocktakeSessions(limit);
+  });
+
+  ipcMain.handle('stocktake:createAndPost', async (_event, payload: Parameters<typeof createAndPostStocktakeSession>[0]) => {
+    return createAndPostStocktakeSession(payload);
+  });
+
+  ipcMain.handle('inv:getExpiryRiskReport', async (_event, monthsAhead?: number) => {
+    return getExpiryRiskReport(monthsAhead);
+  });
+
+  ipcMain.handle('inv:findDuplicateCandidates', async (_event, limit?: number) => {
+    return findDuplicateItemCandidates(limit);
+  });
+
+  ipcMain.handle('inv:mergeDuplicateItems', async (_event, primaryItemId: number, duplicateItemId: number, managerName: string) => {
+    return mergeDuplicateItems(primaryItemId, duplicateItemId, managerName);
+  });
+
+  ipcMain.handle('inv:runIntegrityAudit', async () => {
+    return runStockAndLedgerIntegrityAudit();
   });
 }
 

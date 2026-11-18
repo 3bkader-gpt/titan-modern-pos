@@ -58,6 +58,13 @@ import {
   SmartShortageItem,
   SupplierPurchaseHistoryOffer,
   ItemVelocityAndBestSupplierReport,
+  StocktakeSessionRecord,
+  PostStocktakeSessionPayload,
+  PostStocktakeSessionResult,
+  ExpiryRiskItem,
+  MergeItemsResult,
+  DuplicateCandidatePair,
+  StockAndLedgerAuditReport,
   AuditLogs,
   LedgerIntegrityStatus
 } from '../shared/types';
@@ -400,6 +407,42 @@ function ensureSchemaUpgrades(database: Database.Database) {
       CREATE INDEX IF NOT EXISTS idx_purchase_items_item_id ON purchase_invoice_items(item_id);
       CREATE INDEX IF NOT EXISTS idx_sales_items_item_id ON sales_invoice_items(item_id);
       CREATE INDEX IF NOT EXISTS idx_sales_items_date_item ON sales_invoice_items(invoice_date, item_id);
+    `);
+
+    // M9: Shelf Stocktake, Velocity Expiry Risk, Duplicate Merge & Integrity Monitor
+    safeAddColumn('items', "shelf_location TEXT DEFAULT ''");
+    database.exec(`
+      CREATE INDEX IF NOT EXISTS idx_items_shelf_location ON items(shelf_location);
+      CREATE TABLE IF NOT EXISTS stocktake_sessions (
+        session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope_label TEXT NOT NULL,
+        status TEXT DEFAULT 'OPEN',
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,
+        total_variance_cost REAL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        posted_at TEXT DEFAULT ''
+      );
+      CREATE TABLE IF NOT EXISTS stocktake_lines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        item_id INTEGER NOT NULL,
+        system_qty REAL NOT NULL,
+        counted_qty REAL NOT NULL,
+        variance_qty REAL NOT NULL,
+        unit_cost REAL NOT NULL,
+        variance_cost REAL NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES stocktake_sessions(session_id)
+      );
+      CREATE TABLE IF NOT EXISTS item_merge_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        primary_item_id INTEGER NOT NULL,
+        duplicate_item_id INTEGER NOT NULL,
+        duplicate_item_name TEXT NOT NULL,
+        moved_stock REAL NOT NULL,
+        merged_by TEXT NOT NULL,
+        merged_at TEXT NOT NULL
+      );
     `);
 
     // Ensure Dr. Mariam Elhomeily account exists in users table
@@ -5726,6 +5769,444 @@ export function autoSuggestMinMaxFromSales(days: number = 60): { updatedCount: n
   });
 
   return tx();
+}
+
+// =========================================================================
+// MODULE 9: Shelf Stocktake, Velocity Expiry Risk, Duplicate Merge & Integrity
+// =========================================================================
+
+export function updateItemShelfLocation(itemId: number, shelfLocation: string): Item {
+  const database = getDatabaseInstance();
+  const cleanShelf = String(shelfLocation || '').trim();
+  const info = database
+    .prepare('UPDATE items SET shelf_location = ? WHERE item_id = ?')
+    .run(cleanShelf, itemId);
+  if (info.changes === 0) {
+    throw new Error(`الصنف رقم #${itemId} غير موجود.`);
+  }
+  return database.prepare('SELECT * FROM items WHERE item_id = ?').get(itemId) as Item;
+}
+
+export function getShelfItemsForStocktake(shelfFilter: string = '', limit: number = 150): Item[] {
+  const database = getDatabaseInstance();
+  const clean = shelfFilter.trim();
+  const safeLimit = Math.min(300, Math.max(10, Number(limit || 150)));
+  if (clean) {
+    return database
+      .prepare(`
+        SELECT * FROM items
+        WHERE COALESCE(shelf_location, '') LIKE ?
+        ORDER BY shelf_location ASC, item_name_en ASC
+        LIMIT ?
+      `)
+      .all(`%${clean}%`, safeLimit) as Item[];
+  }
+  return database
+    .prepare(`
+      SELECT * FROM items
+      WHERE current_stock > 0 OR TRIM(COALESCE(shelf_location, '')) != ''
+      ORDER BY (CASE WHEN TRIM(COALESCE(shelf_location, '')) != '' THEN 0 ELSE 1 END),
+        shelf_location ASC, item_name_en ASC
+      LIMIT ?
+    `)
+    .all(safeLimit) as Item[];
+}
+
+export function getStocktakeSessions(limit: number = 30): StocktakeSessionRecord[] {
+  const database = getDatabaseInstance();
+  return database
+    .prepare('SELECT * FROM stocktake_sessions ORDER BY session_id DESC LIMIT ?')
+    .all(limit) as StocktakeSessionRecord[];
+}
+
+export function createAndPostStocktakeSession(payload: PostStocktakeSessionPayload): PostStocktakeSessionResult {
+  const database = getDatabaseInstance();
+  if (!payload.lines || payload.lines.length === 0) {
+    throw new Error('يجب إدخال صنف واحد على الأقل لاعتماد جلسة الجرد.');
+  }
+
+  const scopeLabel = String(payload.scopeLabel || '').trim() || 'جرد سريع بالدولاب';
+  const { date, timestamp } = getLocalDateTime();
+
+  const tx = database.transaction(() => {
+    const insertSession = database.prepare(`
+      INSERT INTO stocktake_sessions (scope_label, status, user_id, user_name, total_variance_cost, created_at, posted_at)
+      VALUES (?, 'POSTED', ?, ?, 0, ?, ?)
+    `);
+    const sessInfo = insertSession.run(
+      scopeLabel,
+      payload.userId || 99,
+      payload.userName || 'د. مريم الحميلي',
+      timestamp,
+      timestamp
+    );
+    const sessionId = Number(sessInfo.lastInsertRowid);
+
+    const insertLine = database.prepare(`
+      INSERT INTO stocktake_lines (session_id, item_id, system_qty, counted_qty, variance_qty, unit_cost, variance_cost)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const updateStock = database.prepare('UPDATE items SET current_stock = ? WHERE item_id = ?');
+
+    let totalVarianceQty = 0;
+    let totalVarianceCost = 0;
+
+    for (const line of payload.lines) {
+      const item = database.prepare('SELECT * FROM items WHERE item_id = ?').get(line.itemId) as Item | undefined;
+      if (!item) {
+        throw new Error(`الصنف رقم #${line.itemId} غير موجود.`);
+      }
+      const countedQty = Math.max(0, Math.round(Number(line.countedQty) * 10000) / 10000);
+      const systemQty = Number(item.current_stock || 0);
+      const varianceQty = Math.round((countedQty - systemQty) * 10000) / 10000;
+      const unitCost =
+        item.buy_price && item.buy_price > 0
+          ? Number(item.buy_price)
+          : Math.round(Number(item.consumer_price || 0) * 0.75 * 100) / 100;
+      const varianceCost = Math.round(varianceQty * unitCost * 100) / 100;
+
+      insertLine.run(sessionId, item.item_id, systemQty, countedQty, varianceQty, unitCost, varianceCost);
+      updateStock.run(countedQty, item.item_id);
+
+      totalVarianceQty = Math.round((totalVarianceQty + varianceQty) * 10000) / 10000;
+      totalVarianceCost = roundMoney(totalVarianceCost + varianceCost);
+    }
+
+    database
+      .prepare('UPDATE stocktake_sessions SET total_variance_cost = ? WHERE session_id = ?')
+      .run(totalVarianceCost, sessionId);
+
+    let glAccount = '— (جرد مطابق 100%)';
+    if (Math.abs(totalVarianceCost) >= 0.01) {
+      const absCost = Math.abs(totalVarianceCost);
+      const docRef = `STK-${sessionId}`;
+      if (totalVarianceCost < 0) {
+        glAccount = 'مصروفات.تشغيلية.عجز وتسويات جرد';
+        postBalancedGlLines(database, date, docRef, [
+          {
+            account_name: glAccount,
+            notes: `عجز جرد (${scopeLabel}) بواسطة ${payload.userName}`,
+            debit: absCost,
+            credit: 0
+          },
+          {
+            account_name: 'اصول.متداولة.مخزون',
+            notes: `تسوية عجز مخزون (${scopeLabel})`,
+            debit: 0,
+            credit: absCost
+          }
+        ]);
+      } else {
+        glAccount = 'ايرادات.تسويات وجرد زيادة';
+        postBalancedGlLines(database, date, docRef, [
+          {
+            account_name: 'اصول.متداولة.مخزون',
+            notes: `تسوية زيادة جرد (${scopeLabel}) بواسطة ${payload.userName}`,
+            debit: absCost,
+            credit: 0
+          },
+          {
+            account_name: glAccount,
+            notes: `إيراد زيادة مخزون (${scopeLabel})`,
+            debit: 0,
+            credit: absCost
+          }
+        ]);
+      }
+    }
+
+    return {
+      session_id: sessionId,
+      scope_label: scopeLabel,
+      lines_count: payload.lines.length,
+      total_variance_qty: totalVarianceQty,
+      total_variance_cost: totalVarianceCost,
+      gl_account: glAccount,
+      posted_at: timestamp
+    };
+  });
+
+  return tx();
+}
+
+function parseExpiryDateStr(raw: string): Date | null {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+
+  const mmyyyy = s.match(/^(\d{1,2})[-/](\d{4})$/);
+  if (mmyyyy) {
+    const month = parseInt(mmyyyy[1], 10);
+    const year = parseInt(mmyyyy[2], 10);
+    if (month >= 1 && month <= 12 && year >= 2000 && year <= 2099) {
+      return new Date(year, month, 0, 23, 59, 59);
+    }
+  }
+
+  const ymd = s.match(/^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?$/);
+  if (ymd) {
+    const year = parseInt(ymd[1], 10);
+    const month = parseInt(ymd[2], 10);
+    const day = ymd[3] ? parseInt(ymd[3], 10) : 28;
+    if (month >= 1 && month <= 12) {
+      return new Date(year, month - 1, day, 23, 59, 59);
+    }
+  }
+
+  return null;
+}
+
+export function getExpiryRiskReport(monthsAhead: number = 6): ExpiryRiskItem[] {
+  const database = getDatabaseInstance();
+  const horizonDays = Math.max(30, Math.min(730, Math.round(monthsAhead * 30.5)));
+  const dateCutoff30 = getLocalDateOffset(-30);
+  const now = new Date();
+  const msPerDay = 86400000;
+
+  const stockedWithExpiry = database
+    .prepare(`
+      WITH sales_30 AS (
+        SELECT
+          si.item_id,
+          SUM(CASE WHEN COALESCE(si.unit_type, 'عبوة') = 'شريط' AND COALESCE(i.package_units, 1) > 1
+            THEN si.quantity * 1.0 / i.package_units ELSE si.quantity END) as qty_30d
+        FROM sales_invoice_items si
+        JOIN items i ON si.item_id = i.item_id
+        WHERE si.invoice_date >= ?
+        GROUP BY si.item_id
+      )
+      SELECT i.*, COALESCE(s.qty_30d, 0) as qty_30d
+      FROM items i
+      LEFT JOIN sales_30 s ON s.item_id = i.item_id
+      WHERE i.current_stock > 0 AND TRIM(COALESCE(i.expiry_date, '')) != ''
+    `)
+    .all(dateCutoff30) as Array<Item & { qty_30d: number }>;
+
+  const risks: ExpiryRiskItem[] = [];
+  for (const row of stockedWithExpiry) {
+    const expDate = parseExpiryDateStr(row.expiry_date || '');
+    if (!expDate) continue;
+
+    const daysToExpiry = Math.ceil((expDate.getTime() - now.getTime()) / msPerDay);
+    if (daysToExpiry > horizonDays || daysToExpiry < -365) continue;
+
+    const dailyVelocity = Math.round((Number(row.qty_30d || 0) / 30) * 1000) / 1000;
+    const expectedSold =
+      daysToExpiry > 0 ? Math.round(dailyVelocity * daysToExpiry * 100) / 100 : 0;
+    const atRiskQty = Math.max(0, Math.round((row.current_stock - expectedSold) * 100) / 100);
+    if (atRiskQty <= 0) continue;
+
+    const unitCost =
+      row.buy_price && row.buy_price > 0
+        ? Number(row.buy_price)
+        : Math.round(Number(row.consumer_price || 0) * 0.75 * 100) / 100;
+    const atRiskCostEgp = Math.round(atRiskQty * unitCost * 100) / 100;
+
+    risks.push({
+      item_id: row.item_id,
+      item_name_en: row.item_name_en,
+      item_name_ar: row.item_name_ar,
+      shelf_location: row.shelf_location || '',
+      expiry_date: String(row.expiry_date || ''),
+      current_stock: Number(row.current_stock),
+      buy_price: unitCost,
+      consumer_price: Number(row.consumer_price || 0),
+      days_to_expiry: daysToExpiry,
+      daily_velocity: dailyVelocity,
+      expected_sold_before_expiry: expectedSold,
+      at_risk_qty: atRiskQty,
+      at_risk_cost_egp: atRiskCostEgp
+    });
+  }
+
+  risks.sort((a, b) => b.at_risk_cost_egp - a.at_risk_cost_egp);
+  return risks;
+}
+
+export function findDuplicateItemCandidates(limit: number = 60): DuplicateCandidatePair[] {
+  const database = getDatabaseInstance();
+  const rows = database
+    .prepare(`
+      SELECT
+        a.item_id as primary_item_id,
+        a.item_name_en as primary_name,
+        a.current_stock as primary_stock,
+        a.barcode as primary_barcode,
+        b.item_id as duplicate_item_id,
+        b.item_name_en as duplicate_name,
+        b.current_stock as duplicate_stock,
+        b.barcode as duplicate_barcode
+      FROM items a
+      JOIN items b
+        ON a.item_id < b.item_id
+       AND UPPER(TRIM(a.item_name_en)) = UPPER(TRIM(b.item_name_en))
+       AND TRIM(a.item_name_en) != ''
+      LIMIT ?
+    `)
+    .all(limit) as Array<{
+    primary_item_id: number;
+    primary_name: string;
+    primary_stock: number;
+    primary_barcode?: string;
+    duplicate_item_id: number;
+    duplicate_name: string;
+    duplicate_stock: number;
+    duplicate_barcode?: string;
+  }>;
+
+  return rows.map(r => {
+    if (r.duplicate_stock > r.primary_stock) {
+      return {
+        primary_item_id: r.duplicate_item_id,
+        primary_name: r.duplicate_name,
+        primary_stock: r.duplicate_stock,
+        primary_barcode: r.duplicate_barcode,
+        duplicate_item_id: r.primary_item_id,
+        duplicate_name: r.primary_name,
+        duplicate_stock: r.primary_stock,
+        duplicate_barcode: r.primary_barcode,
+        match_reason: 'SAME_NAME' as const
+      };
+    }
+    return { ...r, match_reason: 'SAME_NAME' as const };
+  });
+}
+
+export function mergeDuplicateItems(
+  primaryItemId: number,
+  duplicateItemId: number,
+  managerName: string
+): MergeItemsResult {
+  const database = getDatabaseInstance();
+  if (primaryItemId === duplicateItemId) {
+    throw new Error('لا يمكن دمج الصنف مع نفسه.');
+  }
+  const cleanManager = String(managerName || '').trim();
+  if (!cleanManager) {
+    throw new Error('اسم المدير المسؤول عن الدمج مطلوب.');
+  }
+
+  const { timestamp } = getLocalDateTime();
+
+  const tx = database.transaction(() => {
+    const primary = database.prepare('SELECT * FROM items WHERE item_id = ?').get(primaryItemId) as Item | undefined;
+    const duplicate = database.prepare('SELECT * FROM items WHERE item_id = ?').get(duplicateItemId) as Item | undefined;
+    if (!primary) throw new Error(`الصنف الأساسي #${primaryItemId} غير موجود.`);
+    if (!duplicate) throw new Error(`الصنف المكرر #${duplicateItemId} غير موجود.`);
+
+    const movedStock = Number(duplicate.current_stock || 0);
+    const mergedStock = Math.round((Number(primary.current_stock || 0) + movedStock) * 10000) / 10000;
+
+    database.prepare('UPDATE items SET current_stock = ? WHERE item_id = ?').run(mergedStock, primaryItemId);
+
+    const salesRes = database
+      .prepare('UPDATE sales_invoice_items SET item_id = ? WHERE item_id = ?')
+      .run(primaryItemId, duplicateItemId);
+    const purRes = database
+      .prepare('UPDATE purchase_invoice_items SET item_id = ? WHERE item_id = ?')
+      .run(primaryItemId, duplicateItemId);
+    database
+      .prepare('UPDATE purchase_return_items SET item_id = ? WHERE item_id = ?')
+      .run(primaryItemId, duplicateItemId);
+    database
+      .prepare('UPDATE stocktake_lines SET item_id = ? WHERE item_id = ?')
+      .run(primaryItemId, duplicateItemId);
+
+    const dupBarcodes = database
+      .prepare('SELECT barcode, label FROM item_barcodes WHERE item_id = ?')
+      .all(duplicateItemId) as Array<{ barcode: string; label: string }>;
+    if (duplicate.barcode && duplicate.barcode.trim()) {
+      dupBarcodes.push({ barcode: duplicate.barcode.trim(), label: `باركود مدمج من #${duplicateItemId}` });
+    }
+    let barcodesMoved = 0;
+    const insertBarcodeStmt = database.prepare(`
+      INSERT OR IGNORE INTO item_barcodes (item_id, barcode, label, is_primary, created_at)
+      VALUES (?, ?, ?, 0, ?)
+    `);
+    database.prepare('DELETE FROM item_barcodes WHERE item_id = ?').run(duplicateItemId);
+    for (const b of dupBarcodes) {
+      const code = String(b.barcode || '').trim();
+      if (!code) continue;
+      const info = insertBarcodeStmt.run(primaryItemId, code, b.label || 'باركود مدمج', timestamp);
+      barcodesMoved += info.changes;
+    }
+
+    const primaryHasShortage = database.prepare('SELECT id FROM shortages_drafts WHERE item_id = ?').get(primaryItemId);
+    if (primaryHasShortage) {
+      database.prepare('DELETE FROM shortages_drafts WHERE item_id = ?').run(duplicateItemId);
+    } else {
+      database.prepare('UPDATE shortages_drafts SET item_id = ? WHERE item_id = ?').run(primaryItemId, duplicateItemId);
+    }
+
+    database.prepare(`
+      INSERT INTO item_merge_log (primary_item_id, duplicate_item_id, duplicate_item_name, moved_stock, merged_by, merged_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(primaryItemId, duplicateItemId, duplicate.item_name_en, movedStock, cleanManager, timestamp);
+
+    try {
+      database.prepare('DELETE FROM items_fts WHERE item_id = ?').run(duplicateItemId);
+    } catch {
+      // ignore FTS cleanup errors
+    }
+    database.prepare('DELETE FROM items WHERE item_id = ?').run(duplicateItemId);
+
+    return {
+      primary_item_id: primaryItemId,
+      duplicate_item_id: duplicateItemId,
+      duplicate_item_name: duplicate.item_name_en,
+      moved_stock: movedStock,
+      sales_lines_moved: salesRes.changes,
+      purchase_lines_moved: purRes.changes,
+      barcodes_moved: barcodesMoved,
+      merged_at: timestamp
+    };
+  });
+
+  return tx();
+}
+
+export function runStockAndLedgerIntegrityAudit(): StockAndLedgerAuditReport {
+  const database = getDatabaseInstance();
+  const costRow = database
+    .prepare(`
+      SELECT COALESCE(ROUND(SUM(
+        current_stock * (CASE WHEN COALESCE(buy_price, 0) > 0 THEN buy_price ELSE COALESCE(consumer_price, 0) * 0.75 END)
+      ), 2), 0) as total_cost
+      FROM items WHERE current_stock > 0
+    `)
+    .get() as { total_cost: number };
+
+  const glRow = database
+    .prepare(`
+      SELECT COALESCE(ROUND(SUM(debit - credit), 2), 0) as gl_bal
+      FROM general_ledger_2026
+      WHERE account_name LIKE 'اصول.متداولة.مخزون%'
+    `)
+    .get() as { gl_bal: number };
+
+  const negativeRows = database
+    .prepare('SELECT item_id, item_name_en, current_stock FROM items WHERE current_stock < 0 ORDER BY current_stock ASC LIMIT 50')
+    .all() as Array<{ item_id: number; item_name_en: string; current_stock: number }>;
+
+  const belowCostRows = database
+    .prepare(`
+      SELECT item_id, item_name_en, COALESCE(buy_price, 0) as buy_price, COALESCE(consumer_price, 0) as consumer_price
+      FROM items
+      WHERE current_stock > 0 AND consumer_price > 0 AND buy_price > consumer_price
+      LIMIT 50
+    `)
+    .all() as Array<{ item_id: number; item_name_en: string; buy_price: number; consumer_price: number }>;
+
+  const inventoryItemsCostTotal = Number(costRow.total_cost || 0);
+  const glInventoryBalance = Number(glRow.gl_bal || 0);
+
+  return {
+    inventory_items_cost_total: inventoryItemsCostTotal,
+    gl_inventory_balance: glInventoryBalance,
+    inventory_gl_diff: roundMoney(inventoryItemsCostTotal - glInventoryBalance),
+    negative_stock_items: negativeRows,
+    below_cost_items: belowCostRows,
+    gl_integrity: checkLedgerIntegrity()
+  };
 }
 
 

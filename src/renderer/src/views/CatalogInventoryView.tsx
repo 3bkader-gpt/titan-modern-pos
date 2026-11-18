@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Item, InventoryFilterType, InventoryFilterResult } from '../../../shared/types';
+import { Item, InventoryFilterType, InventoryFilterResult, AuthSession } from '../../../shared/types';
 import { 
   Search, 
   Filter, 
@@ -18,16 +18,28 @@ import {
   CheckCircle2, 
   X,
   FileSpreadsheet,
-  Barcode
+  Barcode,
+  ClipboardCheck,
+  CalendarClock,
+  ShieldCheck
 } from 'lucide-react';
 import { ItemHistoryModal } from '../components/inventory/ItemHistoryModal';
 import { EditStockModal } from '../components/inventory/EditStockModal';
 import { DrugEyeSubstituteModal } from '../components/pos/DrugEyeSubstituteModal';
 import { BarcodeLabelModal, BarcodeLabelPrintItem } from '../components/inventory/BarcodeLabelModal';
 import { ExportExcelButton } from '../components/common/ExportExcelButton';
+import { ShelfStocktakeModal, ShelfStocktakePanel } from '../components/inventory/ShelfStocktakeModal';
+import { ExpiryRiskTab } from '../components/inventory/ExpiryRiskTab';
+import { IntegrityAndMergeTab } from '../components/inventory/IntegrityAndMergeTab';
 
-export const CatalogInventoryView: React.FC = () => {
+interface CatalogInventoryViewProps {
+  currentUser?: AuthSession | null;
+}
+
+export const CatalogInventoryView: React.FC<CatalogInventoryViewProps> = ({ currentUser }) => {
   // State
+  const [subTab, setSubTab] = useState<'catalog' | 'stocktake' | 'expiry_risk' | 'integrity'>('catalog');
+  const [isStocktakeModalOpen, setIsStocktakeModalOpen] = useState<boolean>(false);
   const [filterType, setFilterType] = useState<InventoryFilterType>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [page, setPage] = useState<number>(1);
@@ -195,6 +207,14 @@ export const CatalogInventoryView: React.FC = () => {
             />
 
             <button
+              onClick={() => setIsStocktakeModalOpen(true)}
+              className="px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <ClipboardCheck className="w-3.5 h-3.5" />
+              <span>جرد دولاب سريع</span>
+            </button>
+
+            <button
               onClick={() => loadData()}
               disabled={loading}
               className="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-medium flex items-center gap-1.5 transition-colors"
@@ -214,7 +234,52 @@ export const CatalogInventoryView: React.FC = () => {
           </div>
         </div>
 
-        {/* 2. Filter Pills & Fast Search */}
+        {/* M9: 4 Sub-Tabs Switcher */}
+        <div className="flex flex-wrap items-center gap-1.5 p-1 mb-3 bg-slate-100 rounded-lg border border-slate-200 text-xs">
+          <button
+            type="button"
+            onClick={() => setSubTab('catalog')}
+            className={`px-3 py-1.5 rounded-md font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+              subTab === 'catalog' ? 'bg-white text-blue-700 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Package className="w-3.5 h-3.5" />
+            <span>الأصناف والأرفف</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('stocktake')}
+            className={`px-3 py-1.5 rounded-md font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+              subTab === 'stocktake' ? 'bg-white text-blue-700 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <ClipboardCheck className="w-3.5 h-3.5" />
+            <span>جرد بالدولاب / الرف</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('expiry_risk')}
+            className={`px-3 py-1.5 rounded-md font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+              subTab === 'expiry_risk' ? 'bg-white text-amber-700 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <CalendarClock className="w-3.5 h-3.5" />
+            <span>مخاطر الإكسباير بالسرعة</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('integrity')}
+            className={`px-3 py-1.5 rounded-md font-bold flex items-center gap-1.5 cursor-pointer transition-all ${
+              subTab === 'integrity' ? 'bg-white text-emerald-700 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>أدوات السلامة ودمج المكرر</span>
+          </button>
+        </div>
+
+        {/* 2. Filter Pills & Fast Search (Shown inside Catalog Sub-tab) */}
+        {subTab === 'catalog' && (
         <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 pt-3 border-t border-slate-100">
           {/* Quick Filter Buttons */}
           <div className="flex flex-wrap items-center gap-1.5">
@@ -315,9 +380,29 @@ export const CatalogInventoryView: React.FC = () => {
             )}
           </div>
         </div>
+        )}
       </div>
 
+      {subTab === 'stocktake' && (
+        <ShelfStocktakePanel
+          userId={currentUser?.user_id}
+          userName={currentUser?.user_name}
+          onSessionPosted={() => void loadData()}
+        />
+      )}
+
+      {subTab === 'expiry_risk' && <ExpiryRiskTab />}
+
+      {subTab === 'integrity' && (
+        <IntegrityAndMergeTab
+          isAdmin={!currentUser || currentUser.role === 'ADMIN'}
+          managerName={currentUser?.user_name || 'د. مريم الحميلي'}
+          onMerged={() => void loadData()}
+        />
+      )}
+
       {/* 3. Main Data Table */}
+      {subTab === 'catalog' && (
       <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-right text-xs">
@@ -394,6 +479,20 @@ export const CatalogInventoryView: React.FC = () => {
                               أدوية جدول مراقب
                             </span>
                           ) : null}
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <input
+                              type="text"
+                              defaultValue={item.shelf_location || ''}
+                              placeholder="مكان الرف..."
+                              onBlur={(e) => {
+                                const val = e.target.value.trim();
+                                if (val !== (item.shelf_location || '')) {
+                                  void window.electronAPI?.updateItemShelfLocation?.(item.item_id, val);
+                                }
+                              }}
+                              className="w-28 px-1.5 py-0.5 text-[10px] rounded bg-slate-50 border border-slate-200 focus:bg-white focus:border-blue-400 text-slate-700"
+                            />
+                          </div>
                         </div>
                       </td>
 
@@ -582,8 +681,16 @@ export const CatalogInventoryView: React.FC = () => {
           </div>
         </div>
       </div>
+      )}
 
       {/* 5. Modals */}
+      <ShelfStocktakeModal
+        isOpen={isStocktakeModalOpen}
+        onClose={() => setIsStocktakeModalOpen(false)}
+        userId={currentUser?.user_id}
+        userName={currentUser?.user_name}
+        onSessionPosted={() => void loadData()}
+      />
       {/* Item Full History Modal */}
       <ItemHistoryModal
         itemId={historyItemId}

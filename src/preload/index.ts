@@ -52,7 +52,14 @@ import {
   MatchedImportPurchaseRow,
   SmartShortageFilter,
   SmartShortageItem,
-  ItemVelocityAndBestSupplierReport
+  ItemVelocityAndBestSupplierReport,
+  StocktakeSessionRecord,
+  PostStocktakeSessionPayload,
+  PostStocktakeSessionResult,
+  ExpiryRiskItem,
+  MergeItemsResult,
+  DuplicateCandidatePair,
+  StockAndLedgerAuditReport
 } from '../shared/types';
 
 export const electronAPI = {
@@ -300,7 +307,32 @@ export const electronAPI = {
     ipcRenderer.invoke('inv:updateStockThresholds', itemId, minStock, maxStock, autoReorder),
 
   autoSuggestMinMaxFromSales: (days?: number): Promise<{ updatedCount: number }> =>
-    ipcRenderer.invoke('inv:autoSuggestThresholds', days)
+    ipcRenderer.invoke('inv:autoSuggestThresholds', days),
+
+  // Module 9: Shelf Stocktake, Velocity Expiry Risk, Duplicate Merge & Integrity APIs
+  updateItemShelfLocation: (itemId: number, shelfLocation: string): Promise<Item> =>
+    ipcRenderer.invoke('inv:updateShelfLocation', itemId, shelfLocation),
+
+  getShelfItemsForStocktake: (shelfFilter?: string, limit?: number): Promise<Item[]> =>
+    ipcRenderer.invoke('stocktake:getShelfItems', shelfFilter, limit),
+
+  getStocktakeSessions: (limit?: number): Promise<StocktakeSessionRecord[]> =>
+    ipcRenderer.invoke('stocktake:getSessions', limit),
+
+  createAndPostStocktakeSession: (payload: PostStocktakeSessionPayload): Promise<PostStocktakeSessionResult> =>
+    ipcRenderer.invoke('stocktake:createAndPost', payload),
+
+  getExpiryRiskReport: (monthsAhead?: number): Promise<ExpiryRiskItem[]> =>
+    ipcRenderer.invoke('inv:getExpiryRiskReport', monthsAhead),
+
+  findDuplicateItemCandidates: (limit?: number): Promise<DuplicateCandidatePair[]> =>
+    ipcRenderer.invoke('inv:findDuplicateCandidates', limit),
+
+  mergeDuplicateItems: (primaryItemId: number, duplicateItemId: number, managerName: string): Promise<MergeItemsResult> =>
+    ipcRenderer.invoke('inv:mergeDuplicateItems', primaryItemId, duplicateItemId, managerName),
+
+  runStockAndLedgerIntegrityAudit: (): Promise<StockAndLedgerAuditReport> =>
+    ipcRenderer.invoke('inv:runIntegrityAudit')
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

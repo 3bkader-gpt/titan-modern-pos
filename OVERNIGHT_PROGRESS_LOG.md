@@ -23,7 +23,7 @@
 | **M6** | S2 | محرك البحث المتقدم بـ 9 طرق (`Ctrl+F`) | ✅ DONE | `scripts/verify_m6.ts` | `0.00 EGP` | `feat(m6)` | 2026-11-18 02:49 | `.685` / `AU*625` / `=OJMANTYN` / 3 Scopes |
 | **M7** | S2 | استيراد فواتير Excel/CSV وتصدير التقارير الشامل | ✅ DONE | `scripts/verify_m7.ts` | `0.00 EGP` | `feat(m7)` | 2026-11-18 02:54 | + تغليف Sprint 2 (`package:dir` ← `F:\app`) |
 | **M8** | S3 | النواقص الذكية + حد الطلب + معدل السحب وأفضل مورد | ✅ DONE | `scripts/verify_m8.ts` | `0.00 EGP` | `feat(m8)` | 2026-11-18 03:02 | `min_stock`/`max_stock` + `drafts_agg` + ترشيح المخزن |
-| **M9** | S3 | الجرد بالدولاب + مخاطر الإكسباير + دمج المكرر + مراقب السلامة | ⏳ PENDING | `scripts/verify_m9.ts` | — | — | — | + تغليف Sprint 3 (`package:dir` ← `F:\app`) |
+| **M9** | S3 | الجرد بالدولاب + مخاطر الإكسباير + دمج المكرر + مراقب السلامة | ✅ DONE | `scripts/verify_m9.ts` | `0.00 EGP` | `feat(m9)` | 2026-11-18 03:08 | + تغليف Sprint 3 (`package:dir` ← `F:\app`) |
 | **M10** | S4 | المرضى المزمنين + التأمين + المثائل/البدائل + DDI | ⏳ PENDING | `scripts/verify_m10.ts` | — | — | — | `F8` + ذمم شركات التأمين + تكرار المادة |
 | **M11** | S4 | الحضور بالباركود + البونص + صافي رأس المال الحي + إغلاق EOD | ⏳ PENDING | `scripts/verify_m11.ts` | — | — | — | + تغليف نهائي `dir portable nsis` ← `F:\` |
 
@@ -39,3 +39,4 @@
 - `2026-11-18 02:49`: إتمام **M6** واجتياز `gate:post -- M6` (`verify_m1..m6.ts`, توازن GL `0.00 EGP`): محرك البحث المتقدم بـ 9 طرق (`src/shared/phonetic.ts`, `advancedSearchItems`) الداعم للبحث الصوتي `=OJMANTYN`/`=AGMENTIN`، النجوم `AU*625`، نهاية الباركود `.1286`، الكود المختصر، النطاقات الثلاثة (`ALL`/`OUR_LIST`/`IN_STOCK`)، ونافذة `Ctrl+F` (`AdvancedDrugFinderModal.tsx`).
 - `2026-11-18 02:54`: إتمام **M7** واجتياز `gate:post -- M7` (`verify_m1..m7.ts`, توازن GL `0.00 EGP`): مستورد فواتير المشتريات الذكي (`ExcelPurchaseImportModal.tsx` + حفظ تفضيل الأعمدة للمورد `excel_column_map_json`) ومولد التصدير الموحد باللغة العربية UTF-8 BOM (`src/shared/csv.ts` + `ExportExcelButton.tsx` في `F3`/`F4`/`F6`/`F7`/`F12`) + تغليف Sprint 2.
 - `2026-11-18 03:02`: إتمام **M8** واجتياز `gate:post -- M8` (`verify_m1..m8.ts`, توازن GL `0.00 EGP`): النواقص الذكية مع حدود الطلب (`min_stock`/`max_stock`), حساب معدل السحب وأيام الكفاية، ترشيح أفضل مورد تاريخي بأعلى خصم وأقل تكلفة صافية، وحساب حد الطلب التلقائي لآخر 60 يوماً (`SmartShortagesTab.tsx` + `PurchasesView`).
+- `2026-11-18 03:08`: إتمام **M9** واجتياز `gate:post -- M9` (`verify_m1..m9.ts`, توازن GL `0.00 EGP`): الجرد الجزئي بالدولاب/الرف بقيد تسوية متزن (`ShelfStocktakeModal.tsx`)، تحليل مخاطر الإكسباير بسرعة السحب (`ExpiryRiskTab.tsx`)، الدمج الآمن للأصناف المكررة (`mergeDuplicateItems` + `item_merge_log`)، ومراقب سلامة المخزون مع GL (`IntegrityAndMergeTab.tsx`) + تغليف Sprint 3.
