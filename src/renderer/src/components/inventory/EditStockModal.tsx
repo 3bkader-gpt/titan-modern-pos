@@ -29,7 +29,9 @@ export const EditStockModal: React.FC<EditStockModalProps> = ({
     discount_pct: 0,
     current_stock: 0,
     expiry_date: '',
-    tax_schedule_category: 0
+    tax_schedule_category: 0,
+    temp_price: 0,
+    temp_price_active: 0
   });
 
   const [saving, setSaving] = useState<boolean>(false);
@@ -52,7 +54,9 @@ export const EditStockModal: React.FC<EditStockModalProps> = ({
           discount_pct: item.discount_pct || 0,
           current_stock: item.current_stock,
           expiry_date: item.expiry_date || '',
-          tax_schedule_category: item.tax_schedule_category || 0
+          tax_schedule_category: item.tax_schedule_category || 0,
+          temp_price: item.temp_price || 0,
+          temp_price_active: item.temp_price_active || 0
         });
       } else {
         // Brand new item mode
@@ -70,7 +74,9 @@ export const EditStockModal: React.FC<EditStockModalProps> = ({
           discount_pct: 0,
           current_stock: 0,
           expiry_date: '',
-          tax_schedule_category: 0
+          tax_schedule_category: 0,
+          temp_price: 0,
+          temp_price_active: 0
         });
       }
       setError(null);
@@ -284,6 +290,33 @@ export const EditStockModal: React.FC<EditStockModalProps> = ({
                 onChange={e => setFormData({ ...formData, expiry_date: e.target.value })}
                 className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 focus:border-blue-500 font-mono text-slate-800 outline-none"
               />
+            </div>
+
+            <div className="col-span-2 sm:col-span-4 pt-2 border-t border-slate-200 grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+              <div>
+                <label className="font-bold text-amber-800 block mb-1">
+                  السعر المؤقت / التسعيرة المزدوجة (ج.م)
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={formData.temp_price || ''}
+                  onChange={e => setFormData({ ...formData, temp_price: parseFloat(e.target.value) || 0 })}
+                  placeholder="0.00"
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-amber-300 bg-amber-50/40 focus:border-amber-500 font-mono font-bold text-slate-900 outline-none"
+                />
+              </div>
+
+              <label className="flex items-center gap-2 pt-4 cursor-pointer text-xs font-bold text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={formData.temp_price_active === 1}
+                  onChange={e => setFormData({ ...formData, temp_price_active: e.target.checked ? 1 : 0 })}
+                  className="w-4 h-4 accent-amber-600 rounded"
+                />
+                <span>تفعيل التبديل للسعر المؤقت داخل الكاشير (F1)</span>
+              </label>
             </div>
           </div>
 

@@ -13,6 +13,7 @@ interface PosCartTableProps {
   items: CartItem[];
   onUpdateQuantity: (index: number, newQty: number) => void;
   onToggleUnit: (index: number) => void;
+  onToggleTempPrice?: (index: number) => void;
   onUpdateDiscount: (index: number, newPct: number) => void;
   onRemoveItem: (index: number) => void;
   onOpenDrugEye: (item: CartItem) => void;
@@ -22,6 +23,7 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
   items,
   onUpdateQuantity,
   onToggleUnit,
+  onToggleTempPrice,
   onUpdateDiscount,
   onRemoveItem,
   onOpenDrugEye
@@ -116,6 +118,23 @@ export const PosCartTable: React.FC<PosCartTableProps> = ({
                       <AlertTriangle className="w-2.5 h-2.5 text-amber-600" />
                       <span>أكبر من الرصيد ({item.current_stock})</span>
                     </span>
+                  )}
+
+                  {item.temp_price_active === 1 && Number(item.temp_price || 0) > 0 && onToggleTempPrice && (
+                    <button
+                      type="button"
+                      onClick={() => onToggleTempPrice(index)}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold border transition-colors cursor-pointer ${
+                        item.applied_price_source === 'TEMP_PRICE'
+                          ? 'bg-amber-500 text-white border-amber-600'
+                          : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
+                      }`}
+                      title="التبديل بين السعر الأساسي والسعر المؤقت"
+                    >
+                      {item.applied_price_source === 'TEMP_PRICE'
+                        ? `سعر مؤقت (${item.temp_price})`
+                        : `تبديل لمؤقت (${item.temp_price})`}
+                    </button>
                   )}
                 </div>
 

@@ -7,14 +7,17 @@ import {
   ReturnSaleInvoiceResult,
   AuthSession,
   EditableSaleInvoiceData,
-  UpdateSaleInvoicePayload
+  UpdateSaleInvoicePayload,
+  DiscountMode
 } from '../../../shared/types';
+import { calculateInvoicePricing } from '../../../shared/pricing';
 import { PosSearchInput } from '../components/pos/PosSearchInput';
 import { PosCartTable } from '../components/pos/PosCartTable';
 import { PosCheckoutPanel } from '../components/pos/PosCheckoutPanel';
 import { ThermalReceiptModal } from '../components/pos/ThermalReceiptModal';
 import { QuickReturnModal } from '../components/pos/QuickReturnModal';
 import { DrugEyeSubstituteModal } from '../components/pos/DrugEyeSubstituteModal';
+import { ManagerOverrideModal } from '../components/auth/ManagerOverrideModal';
 import { playBeepSuccess, playCheckoutChime, playWarningTone } from '../components/pos/soundEffects';
 import { Plus, X, ShoppingBag, Receipt, AlertCircle, CheckCircle2, Pencil } from 'lucide-react';
 
@@ -30,6 +33,8 @@ interface ActiveCartTab {
   title: string;
   items: CartItem[];
   discount: number;
+  discountMode: DiscountMode;
+  discountInputValue: number;
   paymentMethod: 'نقدي' | 'فيزا' | 'محفظة / إنستاباي' | 'آجل' | 'دليفري';
   paidAmount: number;
   clientName: string;
@@ -37,6 +42,13 @@ interface ActiveCartTab {
   clientAddress: string;
   editingInvoiceNumber?: number;
   editingOverridePin?: string;
+}
+
+function getActivePackPrice(item: CartItem): number {
+  if (item.applied_price_source === 'TEMP_PRICE' && item.temp_price_active === 1 && Number(item.temp_price || 0) > 0) {
+    return Number(item.temp_price);
+  }
+  return item.base_consumer_price;
 }
 
 const MAX_TABS = 5;
@@ -59,6 +71,8 @@ export const PosView: React.FC<PosViewProps> = ({
       title: 'فاتورة 1',
       items: [],
       discount: 0,
+      discountMode: 'AMOUNT',
+      discountInputValue: 0,
       paymentMethod: 'نقدي',
       paidAmount: 0,
       clientName: '',
@@ -68,6 +82,7 @@ export const PosView: React.FC<PosViewProps> = ({
   ]);
   const [activeTabId, setActiveTabId] = useState<number>(1);
   const [nextTabNumber, setNextTabNumber] = useState<number>(2);
+  const [pendingSaveOverride, setPendingSaveOverride] = useState<{ openPrint: boolean; actionLabel: string; details: string } | null>(null);
 
   // Modals state
   const [completedInvoice, setCompletedInvoice] = useState<CreateSaleInvoiceResult | null>(null);
@@ -109,6 +124,8 @@ export const PosView: React.FC<PosViewProps> = ({
       title: `تعديل #${inv.invoice_number}`,
       items: data.items,
       discount: inv.discount || 0,
+      discountMode: inv.discount_mode || 'AMOUNT',
+      discountInputValue: inv.discount_input_value ?? inv.discount ?? 0,
       paymentMethod: pm,
       paidAmount: Math.max(0, (inv.total_selling_price || 0) - (inv.discount || 0)),
       clientName: inv.client_name || '',
@@ -157,6 +174,8 @@ export const PosView: React.FC<PosViewProps> = ({
       title: `فاتورة ${nextTabNumber}`,
       items: [],
       discount: 0,
+      discountMode: 'AMOUNT',
+      discountInputValue: 0,
       paymentMethod: 'نقدي',
       paidAmount: 0,
       clientName: '',
@@ -183,6 +202,8 @@ export const PosView: React.FC<PosViewProps> = ({
         ...prev,
         items: [],
         discount: 0,
+        discountMode: 'AMOUNT',
+        discountInputValue: 0,
         paidAmount: 0,
         clientName: '',
         clientPhone: '',
@@ -272,6 +293,9 @@ export const PosView: React.FC<PosViewProps> = ({
         discount_pct: 0,
         line_total: unitPrice,
         tax_schedule_category: item.tax_schedule_category,
+        applied_price_source: 'CONSUMER',
+        temp_price: item.temp_price || 0,
+        temp_price_active: item.temp_price_active || 0,
         current_stock: item.current_stock,
         base_consumer_price: item.consumer_price,
         base_buy_price: effectiveBuyPrice,
@@ -280,6 +304,32 @@ export const PosView: React.FC<PosViewProps> = ({
 
       return { ...tab, items: [newItem, ...tab.items] };
     }, targetTabId);
+  };
+
+  // Toggle between Consumer Price and Dual/Temp Price on a cart line
+  const handleToggleTempPrice = (index: number) => {
+    updateCurrentTab(tab => {
+      const updated = [...tab.items];
+      const item = updated[index];
+      if (!item || item.temp_price_active !== 1 || !item.temp_price || item.temp_price <= 0) return tab;
+
+      const nextSource: 'CONSUMER' | 'TEMP_PRICE' =
+        item.applied_price_source === 'TEMP_PRICE' ? 'CONSUMER' : 'TEMP_PRICE';
+      const nextPackPrice = nextSource === 'TEMP_PRICE' ? Number(item.temp_price) : item.base_consumer_price;
+      const isStrip = item.unit_type === 'unit' && item.package_units > 1;
+      const unitPrice = isStrip
+        ? Math.round((nextPackPrice / item.package_units) * 100) / 100
+        : nextPackPrice;
+      const lineTotal = Math.round(item.quantity * unitPrice * (1 - (item.discount_pct || 0) / 100) * 100) / 100;
+
+      updated[index] = {
+        ...item,
+        applied_price_source: nextSource,
+        unit_price: unitPrice,
+        line_total: lineTotal
+      };
+      return { ...tab, items: updated };
+    });
   };
 
   // Update item quantity
@@ -292,8 +342,9 @@ export const PosView: React.FC<PosViewProps> = ({
       }
       const item = updated[index];
       const validQty = Math.round(newQty * 100) / 100;
+      const activePackPrice = getActivePackPrice(item);
       const rawSubtotal = (item.unit_type === 'unit' && item.package_units > 1)
-        ? (item.base_consumer_price * validQty) / item.package_units
+        ? (activePackPrice * validQty) / item.package_units
         : validQty * item.unit_price;
       const lineTotal = Math.round(rawSubtotal * (1 - (item.discount_pct || 0) / 100) * 100) / 100;
       updated[index] = {
@@ -314,10 +365,11 @@ export const PosView: React.FC<PosViewProps> = ({
 
       const newUnitType: 'pack' | 'unit' = item.unit_type === 'pack' ? 'unit' : 'pack';
       const isStrip = newUnitType === 'unit';
+      const activePackPrice = getActivePackPrice(item);
 
       const unitPrice = isStrip
-        ? Math.round((item.base_consumer_price / item.package_units) * 100) / 100
-        : item.base_consumer_price;
+        ? Math.round((activePackPrice / item.package_units) * 100) / 100
+        : activePackPrice;
       const costPrice = isStrip
         ? Math.round((item.base_buy_price / item.package_units) * 100) / 100
         : item.base_buy_price;
@@ -400,14 +452,15 @@ export const PosView: React.FC<PosViewProps> = ({
       }
 
       const isStrip = newUnitType === 'unit' && pkg > 1;
+      const activePackPrice = getActivePackPrice(item);
       const unitPrice = isStrip
-        ? Math.round((item.base_consumer_price / pkg) * 100) / 100
-        : item.base_consumer_price;
+        ? Math.round((activePackPrice / pkg) * 100) / 100
+        : activePackPrice;
       const costPrice = isStrip
         ? Math.round((item.base_buy_price / pkg) * 100) / 100
         : item.base_buy_price;
       const rawSubtotal = isStrip
-        ? (item.base_consumer_price * newQty) / pkg
+        ? (activePackPrice * newQty) / pkg
         : newQty * unitPrice;
       const lineTotal = Math.round(rawSubtotal * (1 - (item.discount_pct || 0) / 100) * 100) / 100;
 
@@ -434,9 +487,10 @@ export const PosView: React.FC<PosViewProps> = ({
       const newUnitType: 'pack' | 'unit' = item.unit_type === 'pack' ? 'unit' : 'pack';
       const isStrip = newUnitType === 'unit';
       const newQty = 1;
+      const activePackPrice = getActivePackPrice(item);
       const unitPrice = isStrip
-        ? Math.round((item.base_consumer_price / item.package_units) * 100) / 100
-        : item.base_consumer_price;
+        ? Math.round((activePackPrice / item.package_units) * 100) / 100
+        : activePackPrice;
       const costPrice = isStrip
         ? Math.round((item.base_buy_price / item.package_units) * 100) / 100
         : item.base_buy_price;
@@ -502,14 +556,22 @@ export const PosView: React.FC<PosViewProps> = ({
     setDrugEyeTargetItem(null);
   };
 
-  // Calculations
-  const subtotal = currentTab.items.reduce((acc, curr) => acc + curr.line_total, 0);
-  const netTotal = Math.max(0, Math.round((subtotal - (currentTab.discount || 0)) * 100) / 100);
+  // Calculations via shared pricing engine
+  const pricing = calculateInvoicePricing(
+    currentTab.items,
+    currentTab.discountMode,
+    currentTab.discountInputValue
+  );
+  const subtotal = pricing.subtotal;
+  const netTotal = pricing.netTotal;
   const paid = currentTab.paidAmount || netTotal;
   const changeAmount = Math.max(0, Math.round((paid - netTotal) * 100) / 100);
 
-  // Save Sale Invoice (Atomic Execution)
-  const executeSaveInvoice = async (openPrintModal: boolean = false) => {
+  // Save Sale Invoice (Atomic Execution with Manager Override Preflight)
+  const executeSaveInvoice = async (
+    openPrintModal: boolean = false,
+    overrideAuth?: { pinCode: string; managerName: string }
+  ) => {
     if (currentTab.items.length === 0) {
       showNotification('لا يمكن حفظ فاتورة فارغة. يرجى إضافة أصناف.', 'error');
       playWarningTone();
@@ -528,11 +590,36 @@ export const PosView: React.FC<PosViewProps> = ({
       return;
     }
 
+    // Check role / below-cost guard before submitting when user is not ADMIN
+    if (currentUser && currentUser.role !== 'ADMIN' && !overrideAuth) {
+      if (pricing.isBelowCost || currentTab.discountMode === 'WHOLESALE_COST') {
+        setPendingSaveOverride({
+          openPrint: openPrintModal,
+          actionLabel: 'البيع بسعر التكلفة أو أقل',
+          details: `صافي الفاتورة (${netTotal.toFixed(2)} ج.م) يساوي أو يقل عن التكلفة (${pricing.totalCost.toFixed(2)} ج.م).`
+        });
+        playWarningTone();
+        return;
+      }
+      const roleMaxPct = currentUser.max_discount_pct ?? (currentUser.role === 'CASHIER' ? 3 : 10);
+      if (currentUser.role === 'CASHIER' && pricing.effectiveDiscountPct > roleMaxPct + 0.01) {
+        setPendingSaveOverride({
+          openPrint: openPrintModal,
+          actionLabel: 'تجاوز حد خصم الكاشير',
+          details: `نسبة الخصم (${pricing.effectiveDiscountPct}%) تتجاوز الحد المسموح (${roleMaxPct}%).`
+        });
+        playWarningTone();
+        return;
+      }
+    }
+
     setIsSaving(true);
     try {
       const payload: CreateSaleInvoicePayload = {
         items: currentTab.items,
-        discount: currentTab.discount || 0,
+        discount: pricing.discountAmount,
+        discount_mode: currentTab.discountMode,
+        discount_input_value: currentTab.discountInputValue,
         payment_method: currentTab.paymentMethod,
         client_name: currentTab.clientName,
         client_phone: currentTab.clientPhone,
@@ -540,7 +627,10 @@ export const PosView: React.FC<PosViewProps> = ({
         is_delivery: currentTab.paymentMethod === 'دليفري',
         paid_amount: paid,
         user_id: currentUser?.user_id,
-        cashier_name: currentUser?.user_name
+        cashier_name: currentUser?.user_name,
+        user_role: currentUser?.role,
+        manager_override_pin: overrideAuth?.pinCode || currentTab.editingOverridePin,
+        override_manager_name: overrideAuth?.managerName
       };
 
       if (window.electronAPI) {
@@ -552,7 +642,7 @@ export const PosView: React.FC<PosViewProps> = ({
             editor_user_id: currentUser?.user_id || 99,
             editor_user_name: currentUser?.user_name || 'مدير الصيدلية',
             editor_role: currentUser?.role || 'ADMIN',
-            manager_override_pin: currentTab.editingOverridePin
+            manager_override_pin: overrideAuth?.pinCode || currentTab.editingOverridePin
           };
           result = await window.electronAPI.updateSavedSaleInvoice(updatePayload);
         } else {
@@ -585,6 +675,8 @@ export const PosView: React.FC<PosViewProps> = ({
               title: 'فاتورة 1',
               items: [],
               discount: 0,
+              discountMode: 'AMOUNT',
+              discountInputValue: 0,
               paidAmount: 0,
               clientName: '',
               clientPhone: '',
@@ -643,7 +735,7 @@ export const PosView: React.FC<PosViewProps> = ({
         <div className="flex items-center gap-2 overflow-x-auto py-0.5 no-scrollbar">
           {tabs.map((tab, idx) => {
             const isActive = tab.id === activeTabId;
-            const tabTotal = tab.items.reduce((acc, curr) => acc + curr.line_total, 0) - (tab.discount || 0);
+            const tabTotal = calculateInvoicePricing(tab.items, tab.discountMode, tab.discountInputValue).netTotal;
 
             return (
               <div
@@ -786,6 +878,8 @@ export const PosView: React.FC<PosViewProps> = ({
                   title: 'فاتورة 1',
                   items: [],
                   discount: 0,
+                  discountMode: 'AMOUNT',
+                  discountInputValue: 0,
                   paidAmount: 0,
                   clientName: '',
                   clientPhone: '',
@@ -806,7 +900,7 @@ export const PosView: React.FC<PosViewProps> = ({
       <div>
         <PosSearchInput
           onAddItem={handleAddItem}
-          disabledGlobalCapture={showReceiptModal || showReturnModal || !!drugEyeTargetItem}
+          disabledGlobalCapture={showReceiptModal || showReturnModal || !!drugEyeTargetItem || !!pendingSaveOverride}
           hasCartItems={currentTab.items.length > 0}
           onArrowAdjust={handleArrowAdjustLastItem}
           onToggleLastUnit={handleToggleLastItemUnit}
@@ -832,6 +926,7 @@ export const PosView: React.FC<PosViewProps> = ({
             items={currentTab.items}
             onUpdateQuantity={handleUpdateQuantity}
             onToggleUnit={handleToggleUnit}
+            onToggleTempPrice={handleToggleTempPrice}
             onUpdateDiscount={handleUpdateDiscount}
             onRemoveItem={handleRemoveItem}
             onOpenDrugEye={item => {
@@ -852,8 +947,25 @@ export const PosView: React.FC<PosViewProps> = ({
         <div className="col-span-12 lg:col-span-4 h-full min-h-0">
           <PosCheckoutPanel
             subtotal={subtotal}
-            discount={currentTab.discount}
-            onChangeDiscount={d => updateCurrentTab(t => ({ ...t, discount: d }))}
+            discount={pricing.discountAmount}
+            discountMode={currentTab.discountMode}
+            onChangeDiscountMode={mode =>
+              updateCurrentTab(t => {
+                const nextPricing = calculateInvoicePricing(t.items, mode, t.discountInputValue);
+                return { ...t, discountMode: mode, discount: nextPricing.discountAmount };
+              })
+            }
+            discountInputValue={currentTab.discountInputValue}
+            onChangeDiscountInputValue={val =>
+              updateCurrentTab(t => {
+                const nextPricing = calculateInvoicePricing(t.items, t.discountMode, val);
+                return { ...t, discountInputValue: val, discount: nextPricing.discountAmount };
+              })
+            }
+            totalCost={pricing.totalCost}
+            isBelowCost={pricing.isBelowCost}
+            isAdmin={!currentUser || currentUser.role === 'ADMIN'}
+            maxRecommendedDiscountPct={currentUser?.max_discount_pct || 15}
             netTotal={netTotal}
             paymentMethod={currentTab.paymentMethod}
             onChangePaymentMethod={m => updateCurrentTab(t => ({ ...t, paymentMethod: m }))}
@@ -904,6 +1016,22 @@ export const PosView: React.FC<PosViewProps> = ({
         onClose={() => setDrugEyeTargetItem(null)}
         onSelectSubstitute={handleSelectSubstitute}
       />
+
+      {/* M4: Manager Override Modal for below-cost or over-limit discount */}
+      {currentUser && (
+        <ManagerOverrideModal
+          isOpen={!!pendingSaveOverride}
+          currentUserId={currentUser.user_id}
+          actionLabel={pendingSaveOverride?.actionLabel || 'تفويض بيع خاص'}
+          details={pendingSaveOverride?.details}
+          onClose={() => setPendingSaveOverride(null)}
+          onAuthorized={({ pinCode, managerName }) => {
+            const shouldPrint = pendingSaveOverride?.openPrint ?? false;
+            setPendingSaveOverride(null);
+            void executeSaveInvoice(shouldPrint, { pinCode, managerName });
+          }}
+        />
+      )}
 
       {/* Toast Notification */}
       {toast && (

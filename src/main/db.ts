@@ -48,9 +48,11 @@ import {
   EditableSaleInvoiceData,
   UpdateSaleInvoicePayload,
   InvoiceRevisionEntry,
+  DiscountMode,
   AuditLogs,
   LedgerIntegrityStatus
 } from '../shared/types';
+import { calculateInvoicePricing } from '../shared/pricing';
 
 let db: Database.Database | null = null;
 let activeDbFilePath: string | null = null;
@@ -300,6 +302,14 @@ function ensureSchemaUpgrades(database: Database.Database) {
       );
       CREATE INDEX IF NOT EXISTS idx_inv_rev_invoice ON invoice_revisions_log(invoice_id);
     `);
+
+    // M4: Smart Pricing, Profit-% Discount, Temp Price & Below-Cost Guard
+    safeAddColumn('items', 'temp_price REAL DEFAULT 0');
+    safeAddColumn('items', 'temp_price_active INTEGER DEFAULT 0');
+    safeAddColumn('sales_invoices', "discount_mode TEXT DEFAULT 'AMOUNT'");
+    safeAddColumn('sales_invoices', 'discount_input_value REAL DEFAULT 0');
+    safeAddColumn('sales_invoices', "override_manager_name TEXT DEFAULT ''");
+    safeAddColumn('sales_invoice_items', "applied_price_source TEXT DEFAULT 'CONSUMER'");
 
     // Ensure Dr. Mariam Elhomeily account exists in users table
     const existingDoctor = database.prepare("SELECT * FROM users WHERE user_name LIKE '%مريم%' OR user_name LIKE '%الحميلي%'").get();
@@ -814,6 +824,153 @@ export function getSalesInvoiceItems(invoiceNumber: number): SalesInvoiceItem[] 
   `).all(invoiceNumber) as SalesInvoiceItem[];
 }
 
+function resolveAuthoritativeSaleLinesAndPricing(
+  database: Database.Database,
+  payload: CreateSaleInvoicePayload,
+  opts?: { requesterId?: number; requesterRole?: UserRole; targetRef?: string; skipOverrideAuditIfAlreadyVerified?: boolean }
+): {
+  totalSellingPrice: number;
+  totalCostPrice: number;
+  discount: number;
+  netTotal: number;
+  profit: number;
+  discountMode: DiscountMode;
+  discountInputValue: number;
+  overrideManagerName: string;
+} {
+  const getItemPricingStmt = database.prepare(`
+    SELECT item_id, item_name_en, consumer_price, temp_price, temp_price_active,
+           buy_price, discount_pct, pharmacy_discount_percent, package_units
+    FROM items WHERE item_id = ?
+  `);
+
+  for (const item of payload.items) {
+    const itemDb = getItemPricingStmt.get(item.item_id) as {
+      item_id: number;
+      item_name_en: string;
+      consumer_price: number;
+      temp_price?: number | null;
+      temp_price_active?: number;
+      buy_price: number;
+      discount_pct: number;
+      pharmacy_discount_percent: number;
+      package_units: number;
+    } | undefined;
+
+    if (!itemDb) {
+      throw new Error(`الصنف رقم #${item.item_id} غير موجود في قاعدة البيانات.`);
+    }
+
+    const pkgUnits = itemDb.package_units && itemDb.package_units > 1 ? itemDb.package_units : 1;
+    item.package_units = pkgUnits;
+
+    const useTempPrice =
+      item.applied_price_source === 'TEMP_PRICE' &&
+      Number(itemDb.temp_price_active || 0) === 1 &&
+      Number(itemDb.temp_price || 0) > 0;
+    const basePackPrice = useTempPrice ? Number(itemDb.temp_price) : itemDb.consumer_price;
+    item.applied_price_source = useTempPrice ? 'TEMP_PRICE' : 'CONSUMER';
+
+    const unitPrice =
+      item.unit_type === 'unit'
+        ? Math.round((basePackPrice / pkgUnits) * 100) / 100
+        : basePackPrice;
+    item.unit_price = unitPrice;
+
+    const discPct = Math.min(100, Math.max(0, Number(item.discount_pct || 0)));
+    item.discount_pct = discPct;
+    item.line_total = Math.round(item.quantity * unitPrice * (1 - discPct / 100) * 100) / 100;
+
+    const cp = itemDb.consumer_price || unitPrice;
+    const bp = itemDb.buy_price || 0;
+    const disc =
+      itemDb.discount_pct && itemDb.discount_pct > 0
+        ? itemDb.discount_pct
+        : itemDb.pharmacy_discount_percent && itemDb.pharmacy_discount_percent > 0
+          ? itemDb.pharmacy_discount_percent
+          : 25;
+
+    const effectivePackCost =
+      bp <= 0 || bp < cp * 0.35 ? Math.round(cp * (1.0 - disc / 100.0) * 100) / 100 : bp;
+    const effectiveCost =
+      item.unit_type === 'unit' && pkgUnits > 1
+        ? Math.round((effectivePackCost / pkgUnits) * 100) / 100
+        : effectivePackCost;
+
+    item.cost_price = effectiveCost;
+  }
+
+  const mode: DiscountMode = payload.discount_mode || 'AMOUNT';
+  const rawInput =
+    payload.discount_mode !== undefined
+      ? Number(payload.discount_input_value ?? payload.discount ?? 0)
+      : Number(payload.discount ?? 0);
+
+  const pricing = calculateInvoicePricing(payload.items, mode, rawInput);
+
+  const requesterId = opts?.requesterId ?? (payload.user_id && payload.user_id > 0 ? payload.user_id : 99);
+  let effectiveRole: UserRole = 'ADMIN';
+  let roleMaxDiscountPct = 100;
+
+  if (opts?.requesterRole || payload.user_role) {
+    effectiveRole = opts?.requesterRole || payload.user_role || 'ADMIN';
+    roleMaxDiscountPct = effectiveRole === 'CASHIER' ? 3 : effectiveRole === 'PHARMACIST' ? 10 : 100;
+  } else if (payload.user_id && payload.user_id > 0) {
+    const uRow = database
+      .prepare('SELECT role, max_discount_pct FROM users WHERE user_id = ?')
+      .get(payload.user_id) as { role?: string; max_discount_pct?: number } | undefined;
+    if (uRow?.role === 'CASHIER' || uRow?.role === 'PHARMACIST' || uRow?.role === 'ADMIN') {
+      effectiveRole = uRow.role;
+      roleMaxDiscountPct = Number(uRow.max_discount_pct ?? (effectiveRole === 'CASHIER' ? 3 : 10));
+    }
+  }
+
+  let overrideManagerName = (payload.override_manager_name || '').trim();
+
+  if ((pricing.isBelowCost || mode === 'WHOLESALE_COST') && effectiveRole !== 'ADMIN') {
+    if (!payload.manager_override_pin) {
+      throw new Error(
+        'BELOW_COST_REQUIRES_MANAGER_OVERRIDE: لا يمكن البيع بأقل من التكلفة أو بسعر الشراء بدون تفويض المدير.'
+      );
+    }
+    if (!opts?.skipOverrideAuditIfAlreadyVerified) {
+      const auth = verifyManagerOverride(
+        payload.manager_override_pin,
+        requesterId,
+        'البيع بسعر التكلفة أو أقل',
+        opts?.targetRef || ''
+      );
+      overrideManagerName = auth.managerName;
+    }
+  } else if (effectiveRole === 'CASHIER' && pricing.effectiveDiscountPct > roleMaxDiscountPct + 0.01) {
+    if (!payload.manager_override_pin) {
+      throw new Error(
+        `DISCOUNT_EXCEEDS_ROLE_LIMIT: نسبة الخصم (${pricing.effectiveDiscountPct}%) تتجاوز الحد المسموح للكاشير (${roleMaxDiscountPct}%) بدون تفويض المدير.`
+      );
+    }
+    if (!opts?.skipOverrideAuditIfAlreadyVerified) {
+      const auth = verifyManagerOverride(
+        payload.manager_override_pin,
+        requesterId,
+        'تجاوز حد خصم الكاشير',
+        opts?.targetRef || ''
+      );
+      overrideManagerName = auth.managerName;
+    }
+  }
+
+  return {
+    totalSellingPrice: pricing.subtotal,
+    totalCostPrice: pricing.totalCost,
+    discount: pricing.discountAmount,
+    netTotal: pricing.netTotal,
+    profit: pricing.profit,
+    discountMode: pricing.discountMode,
+    discountInputValue: pricing.discountInputValue,
+    overrideManagerName
+  };
+}
+
 /**
  * Phase 2 POS: Create Sales Invoice (Atomic SQLite Transaction)
  */
@@ -852,85 +1009,24 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
     const fullTimestamp = local.timestamp;
     const year = local.year;
 
-    // Statement to query item pricing & discount metadata
-    const getItemPricingStmt = database.prepare(`
-      SELECT item_id, item_name_en, item_name_ar, consumer_price, buy_price, discount_pct, pharmacy_discount_percent, package_units
-      FROM items WHERE item_id = ?
-    `);
-
-    // 2. Compute Totals with Authoritative Server Pricing & Effective Cost Price
-    let totalSellingPrice = 0;
-    let totalCostPrice = 0;
-
-    for (const item of payload.items) {
-      const itemDb = getItemPricingStmt.get(item.item_id) as {
-        item_id: number;
-        item_name_en: string;
-        item_name_ar: string;
-        consumer_price: number;
-        buy_price: number;
-        discount_pct: number;
-        pharmacy_discount_percent: number;
-        package_units: number;
-      } | undefined;
-
-      if (!itemDb) {
-        throw new Error(`الصنف رقم #${item.item_id} غير موجود في قاعدة البيانات.`);
-      }
-
-      const pkgUnits = (itemDb.package_units && itemDb.package_units > 1) ? itemDb.package_units : 1;
-      item.package_units = pkgUnits;
-
-      // Authoritative consumer price from DB
-      let authoritativeUnitPrice = itemDb.consumer_price;
-      if (item.unit_type === 'unit') {
-        authoritativeUnitPrice = Math.round((itemDb.consumer_price / pkgUnits) * 100) / 100;
-      }
-      item.unit_price = authoritativeUnitPrice;
-
-      // Clamp discount percentage to [0, 100]
-      const discPct = Math.min(100, Math.max(0, Number(item.discount_pct || 0)));
-      item.discount_pct = discPct;
-
-      // Authoritative line total calculated server-side
-      const authoritativeLineTotal = Math.round(item.quantity * authoritativeUnitPrice * (1 - (discPct / 100)) * 100) / 100;
-      item.line_total = authoritativeLineTotal;
-      totalSellingPrice += authoritativeLineTotal;
-
-      let effectiveCost = item.cost_price;
-      const cp = itemDb.consumer_price || authoritativeUnitPrice;
-      const bp = itemDb.buy_price || 0;
-      const disc = (itemDb.discount_pct && itemDb.discount_pct > 0)
-        ? itemDb.discount_pct
-        : ((itemDb.pharmacy_discount_percent && itemDb.pharmacy_discount_percent > 0) ? itemDb.pharmacy_discount_percent : 25);
-
-      const effectivePackCost = (bp <= 0 || bp < (cp * 0.35))
-        ? Math.round(cp * (1.0 - (disc / 100.0)) * 100) / 100
-        : bp;
-
-      if (item.unit_type === 'unit' && pkgUnits > 1) {
-        effectiveCost = Math.round((effectivePackCost / pkgUnits) * 100) / 100;
-      } else {
-        effectiveCost = effectivePackCost;
-      }
-
-      // Update item cost_price for the line record
-      item.cost_price = effectiveCost;
-      totalCostPrice += Math.round((effectiveCost * item.quantity) * 100) / 100;
-    }
-
-    totalSellingPrice = Math.round(totalSellingPrice * 100) / 100;
-    totalCostPrice = Math.round(totalCostPrice * 100) / 100;
-
-    // Validate invoice-level discount
-    const rawDiscount = Number(payload.discount || 0);
-    const discount = Math.max(0, Math.min(totalSellingPrice, Math.round(rawDiscount * 100) / 100));
-    const netTotal = Math.max(0, Math.round((totalSellingPrice - discount) * 100) / 100);
-    const profit = Math.round((netTotal - totalCostPrice) * 100) / 100;
+    // 2. Authoritative pricing, discount mode & below-cost/role guard
+    const resolved = resolveAuthoritativeSaleLinesAndPricing(database, payload, {
+      targetRef: `INV-${invoiceNumber}`
+    });
+    const {
+      totalSellingPrice,
+      totalCostPrice,
+      discount,
+      netTotal,
+      profit,
+      discountMode,
+      discountInputValue,
+      overrideManagerName
+    } = resolved;
 
     // Paid amount & change validation
     const paid = payload.paid_amount !== undefined && payload.paid_amount !== null ? payload.paid_amount : netTotal;
-    if ((payload.payment_method === 'نقدي' || payload.payment_method === 'دليفري') && paid < netTotal) {
+    if ((payload.payment_method === 'نقدي' || payload.payment_method === 'دليفري') && paid + 0.001 < netTotal) {
       throw new Error(`المبلغ المدفوع (${paid} ج.م) أقل من إجمالي الفاتورة المطلوبة (${netTotal} ج.م).`);
     }
     const change = Math.max(0, Math.round((paid - netTotal) * 100) / 100);
@@ -945,9 +1041,10 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
       INSERT INTO sales_invoices (
         invoice_number, invoice_date, invoice_time, item_count,
         total_selling_price, total_cost_price, profit, year,
-        discount, payment_method, client_name, client_phone, client_address, notes,
+        discount, discount_mode, discount_input_value, override_manager_name,
+        payment_method, client_name, client_phone, client_address, notes,
         user_id, cashier_name
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       invoiceNumber,
       invoiceDate,
@@ -958,6 +1055,9 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
       profit,
       year,
       discount,
+      discountMode,
+      discountInputValue,
+      overrideManagerName,
       payload.payment_method,
       payload.client_name || '',
       payload.client_phone || '',
@@ -976,8 +1076,8 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
 
     const insertItemStmt = database.prepare(`
       INSERT INTO sales_invoice_items (
-        id, invoice_number, line_number, item_id, item_name, quantity, unit_price, discount_pct, line_total, invoice_date, invoice_time, unit_type, cost_price
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, invoice_number, line_number, item_id, item_name, quantity, unit_price, discount_pct, line_total, invoice_date, invoice_time, unit_type, cost_price, applied_price_source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const updateStockStmt = database.prepare(`
@@ -1009,7 +1109,8 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
         invoiceDate,
         fullTimestamp,
         item.unit_type === 'unit' ? 'شريط' : 'عبوة',
-        item.cost_price || 0
+        item.cost_price || 0,
+        item.applied_price_source || 'CONSUMER'
       );
 
       // Fractional or pack deduction
@@ -1697,7 +1798,9 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
           current_stock = COALESCE(?, current_stock),
           expiry_date = COALESCE(?, expiry_date),
           pharmacy_discount_percent = COALESCE(?, pharmacy_discount_percent),
-          tax_schedule_category = COALESCE(?, tax_schedule_category)
+          tax_schedule_category = COALESCE(?, tax_schedule_category),
+          temp_price = COALESCE(?, temp_price),
+          temp_price_active = COALESCE(?, temp_price_active)
         WHERE item_id = ?
       `).run(
         itemData.barcode,
@@ -1715,6 +1818,8 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         itemData.expiry_date,
         itemData.pharmacy_discount_percent,
         itemData.tax_schedule_category,
+        itemData.temp_price ?? existing.temp_price ?? 0,
+        itemData.temp_price_active ?? existing.temp_price_active ?? 0,
         itemData.item_id
       );
 
@@ -1743,8 +1848,9 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         INSERT INTO items (
           item_id, barcode, item_name_en, item_name_ar, producer, generic_name, category,
           consumer_price, previous_price, package_units, discount_pct, buy_price,
-          current_stock, expiry_date, pharmacy_discount_percent, tax_schedule_category
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          current_stock, expiry_date, pharmacy_discount_percent, tax_schedule_category,
+          temp_price, temp_price_active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         newItemId,
         barcode,
@@ -1761,7 +1867,9 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         itemData.current_stock || 0,
         itemData.expiry_date || '',
         itemData.pharmacy_discount_percent || 0,
-        itemData.tax_schedule_category || 0
+        itemData.tax_schedule_category || 0,
+        itemData.temp_price || 0,
+        itemData.temp_price_active || 0
       );
 
       // Insert into FTS5
@@ -4282,6 +4390,8 @@ export function getSaleInvoiceForEdit(invoiceNumber: number): EditableSaleInvoic
       COALESCE(i.package_units, 1) as db_package_units,
       COALESCE(i.current_stock, 0) as db_current_stock,
       COALESCE(i.consumer_price, si.unit_price) as db_consumer_price,
+      COALESCE(i.temp_price, 0) as db_temp_price,
+      COALESCE(i.temp_price_active, 0) as db_temp_price_active,
       COALESCE(i.buy_price, 0) as db_buy_price,
       COALESCE(i.discount_pct, 0) as db_discount_pct,
       COALESCE(i.pharmacy_discount_percent, 0) as db_pharm_disc,
@@ -4299,11 +4409,14 @@ export function getSaleInvoiceForEdit(invoiceNumber: number): EditableSaleInvoic
     line_total: number;
     unit_type?: string;
     cost_price?: number;
+    applied_price_source?: string;
     item_name_ar?: string;
     generic_name?: string;
     db_package_units: number;
     db_current_stock: number;
     db_consumer_price: number;
+    db_temp_price: number;
+    db_temp_price_active: number;
     db_buy_price: number;
     db_discount_pct: number;
     db_pharm_disc: number;
@@ -4335,7 +4448,10 @@ export function getSaleInvoiceForEdit(invoiceNumber: number): EditableSaleInvoic
       tax_schedule_category: r.tax_schedule_category,
       current_stock: r.db_current_stock + (unitType === 'unit' ? Math.round((r.quantity / pkg) * 10000) / 10000 : r.quantity),
       base_consumer_price: baseConsumer,
-      base_buy_price: effectivePackBuy
+      base_buy_price: effectivePackBuy,
+      applied_price_source: r.applied_price_source === 'TEMP_PRICE' ? 'TEMP_PRICE' : 'CONSUMER',
+      temp_price: r.db_temp_price || 0,
+      temp_price_active: r.db_temp_price_active || 0
     };
   });
 
@@ -4470,58 +4586,24 @@ export function updateSavedSaleInvoice(payload: UpdateSaleInvoicePayload): Creat
       ]);
     }
 
-    // 4. Compute new line pricing & totals
-    const getItemPricingStmt = database.prepare(`
-      SELECT item_id, item_name_en, consumer_price, buy_price, discount_pct, pharmacy_discount_percent, package_units
-      FROM items WHERE item_id = ?
-    `);
-
-    let totalSellingPrice = 0;
-    let totalCostPrice = 0;
-
-    for (const item of payload.items) {
-      const itemDb = getItemPricingStmt.get(item.item_id) as {
-        item_id: number;
-        item_name_en: string;
-        consumer_price: number;
-        buy_price: number;
-        discount_pct: number;
-        pharmacy_discount_percent: number;
-        package_units: number;
-      } | undefined;
-      if (!itemDb) {
-        throw new Error(`الصنف رقم #${item.item_id} غير موجود في قاعدة البيانات.`);
-      }
-
-      const pkgUnits = itemDb.package_units && itemDb.package_units > 1 ? itemDb.package_units : 1;
-      item.package_units = pkgUnits;
-
-      const unitPrice =
-        item.unit_type === 'unit'
-          ? roundMoney(itemDb.consumer_price / pkgUnits)
-          : itemDb.consumer_price;
-      item.unit_price = unitPrice;
-
-      const discPct = Math.min(100, Math.max(0, Number(item.discount_pct || 0)));
-      item.discount_pct = discPct;
-      item.line_total = roundMoney(item.quantity * unitPrice * (1 - discPct / 100));
-      totalSellingPrice = roundMoney(totalSellingPrice + item.line_total);
-
-      const cp = itemDb.consumer_price || unitPrice;
-      const bp = itemDb.buy_price || 0;
-      const disc =
-        itemDb.discount_pct > 0
-          ? itemDb.discount_pct
-          : (itemDb.pharmacy_discount_percent > 0 ? itemDb.pharmacy_discount_percent : 25);
-      const effectivePackCost = bp <= 0 || bp < cp * 0.35 ? roundMoney(cp * (1 - disc / 100)) : bp;
-      const effectiveCost = item.unit_type === 'unit' && pkgUnits > 1 ? roundMoney(effectivePackCost / pkgUnits) : effectivePackCost;
-      item.cost_price = effectiveCost;
-      totalCostPrice = roundMoney(totalCostPrice + effectiveCost * item.quantity);
-    }
-
-    const discount = Math.max(0, Math.min(totalSellingPrice, roundMoney(payload.discount || 0)));
-    const netTotal = Math.max(0, roundMoney(totalSellingPrice - discount));
-    const profit = roundMoney(netTotal - totalCostPrice);
+    // 4. Compute new line pricing, temp prices, and role/below-cost guards
+    const resolved = resolveAuthoritativeSaleLinesAndPricing(database, payload, {
+      requesterId: payload.editor_user_id,
+      requesterRole: payload.editor_role,
+      targetRef: `INV-${invoiceNumber}`,
+      skipOverrideAuditIfAlreadyVerified: eligibility.requires_manager_override
+    });
+    const {
+      totalSellingPrice,
+      totalCostPrice,
+      discount,
+      netTotal,
+      profit,
+      discountMode,
+      discountInputValue,
+      overrideManagerName
+    } = resolved;
+    authorizedByName = authorizedByName || overrideManagerName;
 
     const paid = payload.paid_amount !== undefined && payload.paid_amount !== null ? payload.paid_amount : netTotal;
     if ((payload.payment_method === 'نقدي' || payload.payment_method === 'دليفري') && paid + 0.001 < netTotal) {
@@ -4537,6 +4619,9 @@ export function updateSavedSaleInvoice(payload: UpdateSaleInvoicePayload): Creat
           total_cost_price = ?,
           profit = ?,
           discount = ?,
+          discount_mode = ?,
+          discount_input_value = ?,
+          override_manager_name = ?,
           payment_method = ?,
           client_name = ?,
           client_phone = ?,
@@ -4552,6 +4637,9 @@ export function updateSavedSaleInvoice(payload: UpdateSaleInvoicePayload): Creat
       totalCostPrice,
       profit,
       discount,
+      discountMode,
+      discountInputValue,
+      overrideManagerName,
       payload.payment_method,
       payload.client_name || '',
       payload.client_phone || '',
@@ -4571,8 +4659,8 @@ export function updateSavedSaleInvoice(payload: UpdateSaleInvoicePayload): Creat
 
     const insertItemStmt = database.prepare(`
       INSERT INTO sales_invoice_items (
-        id, invoice_number, line_number, item_id, item_name, quantity, unit_price, discount_pct, line_total, invoice_date, invoice_time, unit_type, cost_price
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, invoice_number, line_number, item_id, item_name, quantity, unit_price, discount_pct, line_total, invoice_date, invoice_time, unit_type, cost_price, applied_price_source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const deductStockStmt = database.prepare('UPDATE items SET current_stock = ROUND(current_stock - ?, 4) WHERE item_id = ?');
     const checkShortageStmt = database.prepare('SELECT count(*) as count FROM shortages_drafts WHERE item_id = ?');
@@ -4597,7 +4685,8 @@ export function updateSavedSaleInvoice(payload: UpdateSaleInvoicePayload): Creat
         invoiceDate,
         fullTimestamp,
         item.unit_type === 'unit' ? 'شريط' : 'عبوة',
-        item.cost_price || 0
+        item.cost_price || 0,
+        item.applied_price_source || 'CONSUMER'
       );
 
       let deductQty = item.quantity;

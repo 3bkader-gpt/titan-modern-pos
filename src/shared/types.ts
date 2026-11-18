@@ -1,3 +1,5 @@
+export type DiscountMode = 'AMOUNT' | 'TOTAL_PCT' | 'PROFIT_PCT' | 'WHOLESALE_COST';
+
 export interface Item {
   item_id: number;
   item_name_en: string;
@@ -7,6 +9,8 @@ export interface Item {
   category?: string | null;
   consumer_price: number;
   previous_price?: number | null;
+  temp_price?: number | null;
+  temp_price_active?: number;
   package_units: number;
   discount_pct?: number | null;
   buy_price?: number | null;
@@ -36,6 +40,9 @@ export interface SalesInvoice {
   profit: number;
   year: number;
   discount?: number;
+  discount_mode?: DiscountMode;
+  discount_input_value?: number;
+  override_manager_name?: string;
   payment_method?: string;
   client_name?: string;
   client_phone?: string;
@@ -109,11 +116,16 @@ export interface CreateSaleItemPayload {
   discount_pct: number;
   line_total: number;
   tax_schedule_category?: number | null;
+  applied_price_source?: 'CONSUMER' | 'TEMP_PRICE';
+  temp_price?: number | null;
+  temp_price_active?: number;
 }
 
 export interface CreateSaleInvoicePayload {
   items: CreateSaleItemPayload[];
   discount: number;
+  discount_mode?: DiscountMode;
+  discount_input_value?: number;
   payment_method: 'نقدي' | 'فيزا' | 'محفظة / إنستاباي' | 'آجل' | 'دليفري';
   client_name?: string;
   client_phone?: string;
@@ -123,6 +135,9 @@ export interface CreateSaleInvoicePayload {
   paid_amount?: number;
   user_id?: number;
   cashier_name?: string;
+  user_role?: UserRole;
+  manager_override_pin?: string;
+  override_manager_name?: string;
 }
 
 export interface CreateSaleInvoiceResult {
@@ -408,6 +423,8 @@ export interface SaveItemPayload {
   expiry_date?: string;
   pharmacy_discount_percent?: number;
   tax_schedule_category?: number;
+  temp_price?: number;
+  temp_price_active?: number;
 }
 
 // Phase 4: Treasury, Shifts, Customers & Delivery, Financial & Audit Reports
@@ -601,6 +618,9 @@ export interface EditableSaleInvoiceLine {
   current_stock: number;
   base_consumer_price: number;
   base_buy_price: number;
+  applied_price_source?: 'CONSUMER' | 'TEMP_PRICE';
+  temp_price?: number | null;
+  temp_price_active?: number;
 }
 
 export interface EditableSaleInvoiceData {

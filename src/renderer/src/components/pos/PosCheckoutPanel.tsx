@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Customer } from '../../../../shared/types';
+import { Customer, DiscountMode } from '../../../../shared/types';
 import { 
   Banknote, 
   CreditCard, 
@@ -11,13 +11,20 @@ import {
   RotateCcw, 
   AlertTriangle,
   Plus,
-  Coins
+  Coins,
+  ShieldAlert
 } from 'lucide-react';
 
 interface PosCheckoutPanelProps {
   subtotal: number;
   discount: number;
-  onChangeDiscount: (amount: number) => void;
+  discountMode: DiscountMode;
+  onChangeDiscountMode: (mode: DiscountMode) => void;
+  discountInputValue: number;
+  onChangeDiscountInputValue: (val: number) => void;
+  totalCost?: number;
+  isBelowCost?: boolean;
+  isAdmin?: boolean;
   netTotal: number;
   paymentMethod: 'نقدي' | 'فيزا' | 'محفظة / إنستاباي' | 'آجل' | 'دليفري';
   onChangePaymentMethod: (method: 'نقدي' | 'فيزا' | 'محفظة / إنستاباي' | 'آجل' | 'دليفري') => void;
@@ -35,13 +42,19 @@ interface PosCheckoutPanelProps {
   onSaveAndPrint: () => void;
   onOpenQuickReturn: () => void;
   hasItems: boolean;
-  maxRecommendedDiscountPct?: number; // e.g. 15% margin protection
+  maxRecommendedDiscountPct?: number; // e.g. role max discount or 15% margin protection
 }
 
 export const PosCheckoutPanel: React.FC<PosCheckoutPanelProps> = ({
   subtotal,
   discount,
-  onChangeDiscount,
+  discountMode,
+  onChangeDiscountMode,
+  discountInputValue,
+  onChangeDiscountInputValue,
+  totalCost = 0,
+  isBelowCost = false,
+  isAdmin = true,
   netTotal,
   paymentMethod,
   onChangePaymentMethod,
@@ -134,34 +147,99 @@ export const PosCheckoutPanel: React.FC<PosCheckoutPanelProps> = ({
           <span className="font-mono font-bold text-slate-900">{subtotal.toFixed(2)} ج.م</span>
         </div>
 
-        {/* Discount Input */}
-        <div className="flex items-center justify-between gap-2 text-xs">
-          <span className="text-slate-600">قيمة الخصم:</span>
-          <div className="flex items-center gap-1">
-            <input
-              type="number"
-              min="0"
-              step="any"
-              value={discount || ''}
-              onChange={e => onChangeDiscount(Math.max(0, parseFloat(e.target.value) || 0))}
-              placeholder="0.00"
-              className="w-20 px-2 py-1 text-left font-mono font-bold text-xs rounded-lg border border-slate-300 focus:border-blue-500 outline-none"
-            />
-            <span className="text-slate-500 font-mono text-[11px]">ج.م</span>
+        {/* Smart 4-Mode Discount Control */}
+        <div className="p-2 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-slate-700">نوع الخصم الذكي:</span>
+            <span className="font-mono font-bold text-rose-700">
+              {discount > 0 ? `-${discount.toFixed(2)} ج.م (${discountPct.toFixed(1)}%)` : '0.00 ج.م'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-4 gap-1 text-[10px] font-bold">
+            {(
+              [
+                ['AMOUNT', 'ج.م'],
+                ['TOTAL_PCT', '% إجمالي'],
+                ['PROFIT_PCT', '% من الربح ★'],
+                ['WHOLESALE_COST', 'سعر الشراء']
+              ] as Array<[DiscountMode, string]>
+            ).map(([m, label]) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => onChangeDiscountMode(m)}
+                className={`py-1 px-1 rounded-lg border transition-colors cursor-pointer ${
+                  discountMode === m
+                    ? m === 'PROFIT_PCT'
+                      ? 'bg-emerald-600 text-white border-emerald-600'
+                      : 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] text-slate-600">
+              {discountMode === 'AMOUNT'
+                ? 'مبلغ الخصم (ج.م):'
+                : discountMode === 'TOTAL_PCT'
+                  ? 'نسبة من الإجمالي (%):'
+                  : discountMode === 'PROFIT_PCT'
+                    ? 'نسبة من الربح فقط (%):'
+                    : 'تطبيق تلقائي لسعر التكلفة'}
+            </span>
+            {discountMode !== 'WHOLESALE_COST' && (
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min="0"
+                  max={discountMode === 'TOTAL_PCT' || discountMode === 'PROFIT_PCT' ? 100 : undefined}
+                  step="any"
+                  value={discountInputValue || ''}
+                  onChange={e => onChangeDiscountInputValue(Math.max(0, parseFloat(e.target.value) || 0))}
+                  placeholder="0"
+                  className="w-20 px-2 py-1 text-left font-mono font-bold text-xs rounded-lg border border-slate-300 bg-white focus:border-blue-500 outline-none"
+                />
+                <span className="text-slate-500 font-mono text-[11px]">
+                  {discountMode === 'AMOUNT' ? 'ج.م' : '%'}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
+        {/* Below-Cost Guard Alert */}
+        {(isBelowCost || discountMode === 'WHOLESALE_COST') && (
+          <div className="p-2 rounded-lg bg-rose-50 border border-rose-300 text-rose-800 text-[10px] flex items-center gap-1.5 leading-tight font-bold">
+            <ShieldAlert className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+            <span>حارس التكلفة: الصافي عند التكلفة أو أقل — يتطلب تفويض المدير لغير الأدمن!</span>
+          </div>
+        )}
+
         {/* Margin Risk Alert */}
-        {isDiscountRisky && (
+        {!isBelowCost && isDiscountRisky && (
           <div className="p-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[10px] flex items-center gap-1.5 leading-tight">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-            <span>تنبيه: الخصم ({discountPct.toFixed(1)}%) يتجاوز هامش الربح ({maxRecommendedDiscountPct}%)!</span>
+            <span>تنبيه: الخصم ({discountPct.toFixed(1)}%) يتجاوز الحد الموصى به ({maxRecommendedDiscountPct}%)!</span>
           </div>
         )}
 
         {/* Large Net Total Hero Display */}
         <div className="p-3.5 rounded-xl bg-slate-900 text-white shadow-inner flex flex-col justify-between">
-          <span className="text-[11px] text-slate-300 font-medium">الصافي المطلوب دفعه:</span>
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-slate-300 font-medium">الصافي المطلوب دفعه:</span>
+            {isAdmin && subtotal > 0 && (
+              <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                netTotal >= totalCost ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
+              }`}>
+                الربح: {(netTotal - totalCost).toFixed(2)} ج.م
+              </span>
+            )}
+          </div>
           <div className="flex items-baseline justify-between mt-1">
             <span className="text-2xl font-black font-mono tracking-tight text-white">
               {netTotal.toFixed(2)}
