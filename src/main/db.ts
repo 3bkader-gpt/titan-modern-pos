@@ -54,6 +54,10 @@ import {
   AdvancedDrugSearchFilter,
   ImportedPurchaseRowInput,
   MatchedImportPurchaseRow,
+  SmartShortageFilter,
+  SmartShortageItem,
+  SupplierPurchaseHistoryOffer,
+  ItemVelocityAndBestSupplierReport,
   AuditLogs,
   LedgerIntegrityStatus
 } from '../shared/types';
@@ -388,6 +392,16 @@ function ensureSchemaUpgrades(database: Database.Database) {
     // M7: Per-Supplier Excel/CSV Column Mapping Persistence
     safeAddColumn('suppliers', "excel_column_map_json TEXT DEFAULT ''");
 
+    // M8: Smart Shortages Thresholds, Velocity & Best Supplier Indexes
+    safeAddColumn('items', 'min_stock REAL DEFAULT 0');
+    safeAddColumn('items', 'max_stock REAL DEFAULT 0');
+    safeAddColumn('items', 'auto_reorder INTEGER DEFAULT 1');
+    database.exec(`
+      CREATE INDEX IF NOT EXISTS idx_purchase_items_item_id ON purchase_invoice_items(item_id);
+      CREATE INDEX IF NOT EXISTS idx_sales_items_item_id ON sales_invoice_items(item_id);
+      CREATE INDEX IF NOT EXISTS idx_sales_items_date_item ON sales_invoice_items(invoice_date, item_id);
+    `);
+
     // Ensure Dr. Mariam Elhomeily account exists in users table
     const existingDoctor = database.prepare("SELECT * FROM users WHERE user_name LIKE '%مريم%' OR user_name LIKE '%الحميلي%'").get();
     if (!existingDoctor) {
@@ -669,7 +683,7 @@ function buildDrugSearchScopeAndFilters(filter: AdvancedDrugSearchFilter): {
   if (scope === 'IN_STOCK') {
     clauses.push('i.current_stock > 0');
   } else if (scope === 'OUR_LIST') {
-    clauses.push("(i.current_stock > 0 OR COALESCE(i.last_bought_at, '') != '' OR COALESCE(i.last_sold_at, '') != '')");
+    clauses.push("(i.current_stock > 0 OR COALESCE(i.min_stock, 0) > 0 OR COALESCE(i.last_bought_at, '') != '' OR COALESCE(i.last_sold_at, '') != '')");
   }
 
   if (filter.genericName && filter.genericName.trim()) {
@@ -5299,6 +5313,419 @@ export function matchImportedPurchaseRows(
       resolvedExpiryDate
     };
   });
+}
+
+// =========================================================================
+// MODULE 8: Smart Shortages, Sales Velocity & Best Historical Supplier
+// =========================================================================
+
+function getLocalDateOffset(daysDelta: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + daysDelta);
+  return getLocalDateTime(d).date;
+}
+
+function getEffectiveOfferMetrics(raw: {
+  purchase_invoice_id: number;
+  supplier_id: number;
+  supplier_name: string;
+  invoice_date: string;
+  quantity: number;
+  bonus_quantity: number;
+  discount_pct: number;
+  buy_price: number;
+  line_total: number;
+  consumer_price: number;
+}): SupplierPurchaseHistoryOffer {
+  const qty = Number(raw.quantity || 0);
+  const bonus = Math.max(0, Number(raw.bonus_quantity || 0));
+  const totalUnits = qty + bonus;
+  const netCost =
+    totalUnits > 0 && Number(raw.line_total || 0) > 0
+      ? Math.round((Number(raw.line_total) / totalUnits) * 100) / 100
+      : Number(raw.buy_price || 0);
+
+  let effectiveDiscount = Number(raw.discount_pct || 0);
+  if (effectiveDiscount <= 0 && Number(raw.consumer_price || 0) > 0 && netCost > 0) {
+    effectiveDiscount = Math.round(((raw.consumer_price - netCost) / raw.consumer_price) * 1000) / 10;
+  }
+
+  return {
+    purchase_invoice_id: raw.purchase_invoice_id,
+    supplier_id: raw.supplier_id,
+    supplier_name: raw.supplier_name,
+    invoice_date: raw.invoice_date,
+    quantity: qty,
+    bonus_quantity: bonus,
+    discount_pct: Math.max(0, effectiveDiscount),
+    net_unit_cost: netCost,
+    consumer_price: Number(raw.consumer_price || 0)
+  };
+}
+
+function pickBestOffer(offers: SupplierPurchaseHistoryOffer[]): SupplierPurchaseHistoryOffer | null {
+  if (offers.length === 0) return null;
+  const sorted = [...offers].sort((a, b) => {
+    if (Math.abs(b.discount_pct - a.discount_pct) > 0.05) {
+      return b.discount_pct - a.discount_pct;
+    }
+    if (Math.abs(a.net_unit_cost - b.net_unit_cost) > 0.01) {
+      return a.net_unit_cost - b.net_unit_cost;
+    }
+    return b.invoice_date.localeCompare(a.invoice_date);
+  });
+  return sorted[0];
+}
+
+export function getItemVelocityAndBestSupplier(itemId: number): ItemVelocityAndBestSupplierReport {
+  const database = getDatabaseInstance();
+  const item = database.prepare('SELECT * FROM items WHERE item_id = ?').get(itemId) as Item | undefined;
+  if (!item) {
+    throw new Error(`الصنف رقم #${itemId} غير موجود.`);
+  }
+
+  const date30Ago = getLocalDateOffset(-30);
+  const date90Ago = getLocalDateOffset(-90);
+  const pkg = Math.max(1, Number(item.package_units || 1));
+
+  const salesAgg = database
+    .prepare(`
+      SELECT
+        COALESCE(SUM(CASE
+          WHEN invoice_date >= ? THEN
+            (CASE WHEN COALESCE(unit_type, 'عبوة') = 'شريط' AND ? > 1 THEN quantity * 1.0 / ? ELSE quantity END)
+          ELSE 0 END), 0) as sold_30d,
+        COALESCE(SUM(CASE
+          WHEN invoice_date >= ? THEN
+            (CASE WHEN COALESCE(unit_type, 'عبوة') = 'شريط' AND ? > 1 THEN quantity * 1.0 / ? ELSE quantity END)
+          ELSE 0 END), 0) as sold_90d
+      FROM sales_invoice_items
+      WHERE item_id = ? AND invoice_date >= ?
+    `)
+    .get(date30Ago, pkg, pkg, date90Ago, pkg, pkg, itemId, date90Ago) as { sold_30d: number; sold_90d: number };
+
+  const sold30 = Math.round(Number(salesAgg.sold_30d || 0) * 100) / 100;
+  const sold90 = Math.round(Number(salesAgg.sold_90d || 0) * 100) / 100;
+  const dailyVelocity = Math.round((sold30 / 30) * 1000) / 1000;
+  const monthlyVelocity = Math.round(sold30 * 100) / 100;
+  const currentStock = Number(item.current_stock || 0);
+  const minStock = Number(item.min_stock || 0);
+  const maxStock = Number(item.max_stock || 0);
+  const daysRemaining = dailyVelocity > 0 ? Math.round((currentStock / dailyVelocity) * 10) / 10 : null;
+
+  const targetLevel = maxStock > 0 ? maxStock : Math.max(minStock * 2, Math.ceil(monthlyVelocity));
+  const suggestedQty = Math.max(1, Math.ceil(Math.max(0, targetLevel - currentStock)));
+
+  const rawOffers = database
+    .prepare(`
+      SELECT
+        pii.purchase_invoice_id,
+        pi.supplier_id,
+        pi.supplier_name,
+        pi.invoice_date,
+        pii.quantity,
+        COALESCE(pii.bonus_quantity, 0) as bonus_quantity,
+        COALESCE(pii.discount_pct, 0) as discount_pct,
+        COALESCE(pii.buy_price, 0) as buy_price,
+        COALESCE(pii.line_total, 0) as line_total,
+        COALESCE(pii.consumer_price, 0) as consumer_price
+      FROM purchase_invoice_items pii
+      JOIN purchases_invoices pi ON pii.purchase_invoice_id = pi.purchase_invoice_id
+      WHERE pii.item_id = ?
+      ORDER BY pi.invoice_date DESC, pii.purchase_invoice_id DESC
+      LIMIT 10
+    `)
+    .all(itemId) as Array<{
+    purchase_invoice_id: number;
+    supplier_id: number;
+    supplier_name: string;
+    invoice_date: string;
+    quantity: number;
+    bonus_quantity: number;
+    discount_pct: number;
+    buy_price: number;
+    line_total: number;
+    consumer_price: number;
+  }>;
+
+  const recentPurchases = rawOffers.map(getEffectiveOfferMetrics);
+  const bestSupplier = pickBestOffer(recentPurchases);
+
+  return {
+    item_id: item.item_id,
+    item_name_en: item.item_name_en,
+    current_stock: currentStock,
+    min_stock: minStock,
+    max_stock: maxStock,
+    sold_last_30d: sold30,
+    sold_last_90d: sold90,
+    daily_velocity: dailyVelocity,
+    monthly_velocity: monthlyVelocity,
+    days_remaining: daysRemaining,
+    suggested_order_qty: suggestedQty,
+    best_supplier: bestSupplier,
+    recent_purchases: recentPurchases.slice(0, 5)
+  };
+}
+
+export function getSmartShortages(filter: SmartShortageFilter = {}): SmartShortageItem[] {
+  const database = getDatabaseInstance();
+  const daysLookback = Math.max(7, Math.min(180, Number(filter.daysLookback || 30)));
+  const dateCutoff30 = getLocalDateOffset(-30);
+  const dateCutoff90 = getLocalDateOffset(-90);
+  const dateCutoffLookback = getLocalDateOffset(-daysLookback);
+  const limit = Math.min(500, Math.max(10, Number(filter.limit || 200)));
+  const search = String(filter.searchQuery || '').trim();
+  const searchLike = `%${search}%`;
+
+  // Gather candidate item IDs from manual drafts, min_stock alerts, and active velocity movers
+  const candidateRows = database
+    .prepare(`
+      WITH drafts_agg AS (
+        SELECT
+          item_id,
+          MAX(id) as draft_id,
+          MAX(quantity) as draft_qty,
+          MAX(supplier_id) as draft_supplier_id,
+          MAX(supplier_name) as draft_supplier_name
+        FROM shortages_drafts
+        GROUP BY item_id
+      ),
+      sales_win AS (
+        SELECT
+          si.item_id,
+          COALESCE(SUM(CASE WHEN si.invoice_date >= ? THEN
+            (CASE WHEN COALESCE(si.unit_type, 'عبوة') = 'شريط' AND COALESCE(i.package_units, 1) > 1
+              THEN si.quantity * 1.0 / i.package_units ELSE si.quantity END)
+            ELSE 0 END), 0) as sold_30d,
+          COALESCE(SUM(CASE WHEN si.invoice_date >= ? THEN
+            (CASE WHEN COALESCE(si.unit_type, 'عبوة') = 'شريط' AND COALESCE(i.package_units, 1) > 1
+              THEN si.quantity * 1.0 / i.package_units ELSE si.quantity END)
+            ELSE 0 END), 0) as sold_90d,
+          COALESCE(SUM(CASE WHEN si.invoice_date >= ? THEN
+            (CASE WHEN COALESCE(si.unit_type, 'عبوة') = 'شريط' AND COALESCE(i.package_units, 1) > 1
+              THEN si.quantity * 1.0 / i.package_units ELSE si.quantity END)
+            ELSE 0 END), 0) as sold_lookback
+        FROM sales_invoice_items si
+        JOIN items i ON si.item_id = i.item_id
+        WHERE si.invoice_date >= ?
+        GROUP BY si.item_id
+      )
+      SELECT
+        i.*,
+        COALESCE(sw.sold_30d, 0) as sold_30d,
+        COALESCE(sw.sold_90d, 0) as sold_90d,
+        COALESCE(sw.sold_lookback, 0) as sold_lookback,
+        sd.draft_id as draft_id,
+        sd.draft_qty as draft_qty,
+        sd.draft_supplier_id as draft_supplier_id,
+        sd.draft_supplier_name as draft_supplier_name
+      FROM items i
+      LEFT JOIN sales_win sw ON sw.item_id = i.item_id
+      LEFT JOIN drafts_agg sd ON sd.item_id = i.item_id
+      WHERE (
+        sd.draft_id IS NOT NULL
+        OR (COALESCE(i.min_stock, 0) > 0 AND i.current_stock <= i.min_stock AND COALESCE(i.auto_reorder, 1) = 1)
+        OR (COALESCE(sw.sold_lookback, 0) > 0 AND (i.current_stock <= 0 OR (i.current_stock / (sw.sold_lookback * 1.0 / ?)) < 7))
+      )
+      ${filter.onlyCritical ? 'AND (i.current_stock <= 0 OR (COALESCE(i.min_stock, 0) > 0 AND i.current_stock <= i.min_stock) OR (COALESCE(sw.sold_lookback, 0) > 0 AND (i.current_stock / (sw.sold_lookback * 1.0 / ?)) < 5))' : ''}
+      ${filter.supplierId && filter.supplierId > 0 ? 'AND (sd.draft_supplier_id = ? OR EXISTS (SELECT 1 FROM purchase_invoice_items pii JOIN purchases_invoices pi ON pii.purchase_invoice_id = pi.purchase_invoice_id WHERE pii.item_id = i.item_id AND pi.supplier_id = ?))' : ''}
+      ${search ? 'AND (i.item_name_en LIKE ? OR COALESCE(i.item_name_ar, \'\') LIKE ? OR COALESCE(i.generic_name, \'\') LIKE ? OR COALESCE(i.barcode, \'\') LIKE ?)' : ''}
+      ORDER BY
+        CASE
+          WHEN COALESCE(i.min_stock, 0) > 0 AND i.current_stock <= i.min_stock THEN 0
+          WHEN COALESCE(sw.sold_lookback, 0) > 0 AND i.current_stock <= 0 THEN 1
+          WHEN COALESCE(sw.sold_lookback, 0) > 0 THEN 2
+          WHEN i.current_stock <= 0 THEN 3
+          ELSE 4
+        END ASC,
+        COALESCE(sw.sold_30d, 0) DESC,
+        i.item_id ASC
+      LIMIT ?
+    `)
+    .all(
+      dateCutoff30,
+      dateCutoff90,
+      dateCutoffLookback,
+      dateCutoff90,
+      daysLookback,
+      ...(filter.onlyCritical ? [daysLookback] : []),
+      ...(filter.supplierId && filter.supplierId > 0 ? [filter.supplierId, filter.supplierId] : []),
+      ...(search ? [searchLike, searchLike, searchLike, searchLike] : []),
+      Math.max(limit * 3, 600)
+    ) as Array<Item & {
+      sold_30d: number;
+      sold_90d: number;
+      sold_lookback: number;
+      draft_id: number | null;
+      draft_qty: number | null;
+      draft_supplier_id: number | null;
+      draft_supplier_name: string | null;
+    }>;
+
+  const purchaseOfferStmt = database.prepare(`
+    SELECT
+      pii.purchase_invoice_id,
+      pi.supplier_id,
+      pi.supplier_name,
+      pi.invoice_date,
+      pii.quantity,
+      COALESCE(pii.bonus_quantity, 0) as bonus_quantity,
+      COALESCE(pii.discount_pct, 0) as discount_pct,
+      COALESCE(pii.buy_price, 0) as buy_price,
+      COALESCE(pii.line_total, 0) as line_total,
+      COALESCE(pii.consumer_price, 0) as consumer_price
+    FROM purchase_invoice_items pii
+    JOIN purchases_invoices pi ON pii.purchase_invoice_id = pi.purchase_invoice_id
+    WHERE pii.item_id = ?
+    ORDER BY pi.invoice_date DESC, pii.purchase_invoice_id DESC
+    LIMIT 8
+  `);
+
+  const mapped: SmartShortageItem[] = [];
+  for (const row of candidateRows) {
+    const sold30 = Math.round(Number(row.sold_30d || 0) * 100) / 100;
+    const sold90 = Math.round(Number(row.sold_90d || 0) * 100) / 100;
+    const dailyVelocity = Math.round((sold30 / 30) * 1000) / 1000;
+    const monthlyVelocity = sold30;
+    const currentStock = Number(row.current_stock || 0);
+    const minStock = Number(row.min_stock || 0);
+    const maxStock = Number(row.max_stock || 0);
+    const daysOfCover = dailyVelocity > 0 ? Math.round((currentStock / dailyVelocity) * 10) / 10 : null;
+
+    let urgency: SmartShortageItem['urgency'] = 'DRAFT';
+    if (currentStock <= 0) urgency = 'OUT_OF_STOCK';
+    else if (daysOfCover !== null && daysOfCover < 5) urgency = 'LOW_COVER';
+    else if (minStock > 0 && currentStock <= minStock) urgency = 'BELOW_MIN';
+
+    if (filter.onlyCritical && urgency === 'DRAFT') {
+      continue;
+    }
+
+    const rawOffers = purchaseOfferStmt.all(row.item_id) as Array<{
+      purchase_invoice_id: number;
+      supplier_id: number;
+      supplier_name: string;
+      invoice_date: string;
+      quantity: number;
+      bonus_quantity: number;
+      discount_pct: number;
+      buy_price: number;
+      line_total: number;
+      consumer_price: number;
+    }>;
+    const best = pickBestOffer(rawOffers.map(getEffectiveOfferMetrics));
+    const chosenSupplierId = best?.supplier_id ?? row.draft_supplier_id ?? null;
+    if (filter.supplierId && filter.supplierId > 0 && chosenSupplierId !== filter.supplierId) {
+      continue;
+    }
+
+    const targetLevel = maxStock > 0 ? maxStock : Math.max(minStock * 2, Math.ceil(monthlyVelocity));
+    const calcQty = Math.max(1, Math.ceil(Math.max(0, targetLevel - currentStock)));
+    const suggestedQty = row.draft_qty && row.draft_qty > calcQty ? row.draft_qty : calcQty;
+
+    mapped.push({
+      item_id: row.item_id,
+      item_name_en: row.item_name_en,
+      item_name_ar: row.item_name_ar,
+      generic_name: row.generic_name || undefined,
+      producer: row.producer || undefined,
+      barcode: row.barcode || undefined,
+      current_stock: currentStock,
+      min_stock: minStock,
+      max_stock: maxStock,
+      consumer_price: Number(row.consumer_price || 0),
+      buy_price: Number(row.buy_price || 0),
+      discount_pct: Number(row.discount_pct || 0),
+      package_units: Math.max(1, Number(row.package_units || 1)),
+      sold_last_30d: sold30,
+      sold_last_90d: sold90,
+      daily_velocity: dailyVelocity,
+      monthly_velocity: monthlyVelocity,
+      days_of_cover: daysOfCover,
+      suggested_order_qty: suggestedQty,
+      urgency,
+      in_manual_draft: row.draft_id !== null,
+      best_supplier_id: chosenSupplierId,
+      best_supplier_name: best?.supplier_name ?? row.draft_supplier_name ?? 'غير محدد',
+      best_discount_pct: best?.discount_pct,
+      best_net_cost: best?.net_unit_cost,
+      last_purchase_date: best?.invoice_date
+    });
+  }
+
+  const getSmartPriorityTier = (it: SmartShortageItem): number => {
+    if (it.urgency === 'OUT_OF_STOCK' && (it.min_stock > 0 || it.sold_last_30d > 0)) return 0;
+    if (it.urgency === 'LOW_COVER') return 1;
+    if (it.urgency === 'BELOW_MIN') return 2;
+    if (it.urgency === 'OUT_OF_STOCK') return 3;
+    return 4;
+  };
+  mapped.sort((a, b) => {
+    const rankDiff = getSmartPriorityTier(a) - getSmartPriorityTier(b);
+    if (rankDiff !== 0) return rankDiff;
+    return b.sold_last_30d - a.sold_last_30d;
+  });
+
+  return mapped.slice(0, limit);
+}
+
+export function updateItemStockThresholds(
+  itemId: number,
+  minStock: number,
+  maxStock: number,
+  autoReorder: number = 1
+): Item {
+  const database = getDatabaseInstance();
+  const minVal = Math.max(0, Number(minStock) || 0);
+  const maxVal = Math.max(minVal, Number(maxStock) || 0);
+  const autoVal = autoReorder ? 1 : 0;
+
+  const info = database
+    .prepare('UPDATE items SET min_stock = ?, max_stock = ?, auto_reorder = ? WHERE item_id = ?')
+    .run(minVal, maxVal, autoVal, itemId);
+  if (info.changes === 0) {
+    throw new Error(`الصنف رقم #${itemId} غير موجود.`);
+  }
+  return database.prepare('SELECT * FROM items WHERE item_id = ?').get(itemId) as Item;
+}
+
+export function autoSuggestMinMaxFromSales(days: number = 60): { updatedCount: number } {
+  const database = getDatabaseInstance();
+  const lookback = Math.max(14, Math.min(365, Number(days || 60)));
+  const cutoff = getLocalDateOffset(-lookback);
+
+  const rows = database
+    .prepare(`
+      SELECT
+        si.item_id,
+        SUM(CASE WHEN COALESCE(si.unit_type, 'عبوة') = 'شريط' AND COALESCE(i.package_units, 1) > 1
+          THEN si.quantity * 1.0 / i.package_units ELSE si.quantity END) as total_sold
+      FROM sales_invoice_items si
+      JOIN items i ON si.item_id = i.item_id
+      WHERE si.invoice_date >= ?
+      GROUP BY si.item_id
+      HAVING total_sold > 0
+    `)
+    .all(cutoff) as Array<{ item_id: number; total_sold: number }>;
+
+  const updateStmt = database.prepare(`
+    UPDATE items SET min_stock = ?, max_stock = ?, auto_reorder = 1 WHERE item_id = ?
+  `);
+
+  const tx = database.transaction(() => {
+    let updatedCount = 0;
+    for (const r of rows) {
+      const dailyAvg = r.total_sold / lookback;
+      const minStock = Math.max(1, Math.ceil(dailyAvg * 7));
+      const maxStock = Math.max(minStock * 2, Math.ceil(dailyAvg * 30));
+      updateStmt.run(minStock, maxStock, r.item_id);
+      updatedCount++;
+    }
+    return { updatedCount };
+  });
+
+  return tx();
 }
 
 

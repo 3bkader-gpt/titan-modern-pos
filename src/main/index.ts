@@ -60,7 +60,11 @@ import {
   removeItemBarcode,
   ensureItemHasBarcode,
   advancedSearchItems,
-  matchImportedPurchaseRows
+  matchImportedPurchaseRows,
+  getSmartShortages,
+  getItemVelocityAndBestSupplier,
+  updateItemStockThresholds,
+  autoSuggestMinMaxFromSales
 } from './db';
 import { 
   performBackup, 
@@ -429,6 +433,23 @@ function registerIpcHandlers() {
       return matchImportedPurchaseRows(rows, supplierId, columnMapJson);
     }
   );
+
+  // Module 8: Smart Shortages, Velocity & Best Supplier Handlers
+  ipcMain.handle('shortages:getSmart', async (_event, filter?: Record<string, unknown>) => {
+    return getSmartShortages(filter);
+  });
+
+  ipcMain.handle('inv:getVelocityAndBestSupplier', async (_event, itemId: number) => {
+    return getItemVelocityAndBestSupplier(itemId);
+  });
+
+  ipcMain.handle('inv:updateStockThresholds', async (_event, itemId: number, minStock: number, maxStock: number, autoReorder?: number) => {
+    return updateItemStockThresholds(itemId, minStock, maxStock, autoReorder);
+  });
+
+  ipcMain.handle('inv:autoSuggestThresholds', async (_event, days?: number) => {
+    return autoSuggestMinMaxFromSales(days);
+  });
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();

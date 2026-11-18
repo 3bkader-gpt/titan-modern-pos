@@ -49,7 +49,10 @@ import {
   ItemBarcodeEntry,
   AdvancedDrugSearchFilter,
   ImportedPurchaseRowInput,
-  MatchedImportPurchaseRow
+  MatchedImportPurchaseRow,
+  SmartShortageFilter,
+  SmartShortageItem,
+  ItemVelocityAndBestSupplierReport
 } from '../shared/types';
 
 export const electronAPI = {
@@ -284,7 +287,20 @@ export const electronAPI = {
     supplierId?: number,
     columnMapJson?: string
   ): Promise<MatchedImportPurchaseRow[]> =>
-    ipcRenderer.invoke('purchase:matchImportedRows', rows, supplierId, columnMapJson)
+    ipcRenderer.invoke('purchase:matchImportedRows', rows, supplierId, columnMapJson),
+
+  // Module 8: Smart Shortages, Velocity & Best Historical Supplier APIs
+  getSmartShortages: (filter?: SmartShortageFilter): Promise<SmartShortageItem[]> =>
+    ipcRenderer.invoke('shortages:getSmart', filter),
+
+  getItemVelocityAndBestSupplier: (itemId: number): Promise<ItemVelocityAndBestSupplierReport> =>
+    ipcRenderer.invoke('inv:getVelocityAndBestSupplier', itemId),
+
+  updateItemStockThresholds: (itemId: number, minStock: number, maxStock: number, autoReorder?: number): Promise<Item> =>
+    ipcRenderer.invoke('inv:updateStockThresholds', itemId, minStock, maxStock, autoReorder),
+
+  autoSuggestMinMaxFromSales: (days?: number): Promise<{ updatedCount: number }> =>
+    ipcRenderer.invoke('inv:autoSuggestThresholds', days)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

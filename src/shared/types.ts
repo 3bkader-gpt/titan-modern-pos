@@ -24,6 +24,9 @@ export interface Item {
   phonetic_key?: string | null;
   last_sold_at?: string | null;
   last_bought_at?: string | null;
+  min_stock?: number;
+  max_stock?: number;
+  auto_reorder?: number;
 }
 
 export type SearchScope = 'ALL' | 'OUR_LIST' | 'IN_STOCK';
@@ -483,6 +486,74 @@ export interface SaveItemPayload {
   temp_price?: number;
   temp_price_active?: number;
   short_code?: string | null;
+  min_stock?: number;
+  max_stock?: number;
+  auto_reorder?: number;
+}
+
+export interface SmartShortageFilter {
+  onlyCritical?: boolean;
+  supplierId?: number;
+  daysLookback?: number;
+  searchQuery?: string;
+  limit?: number;
+}
+
+export interface SupplierPurchaseHistoryOffer {
+  purchase_invoice_id: number;
+  supplier_id: number;
+  supplier_name: string;
+  invoice_date: string;
+  quantity: number;
+  bonus_quantity: number;
+  discount_pct: number;
+  net_unit_cost: number;
+  consumer_price: number;
+}
+
+export interface SmartShortageItem {
+  item_id: number;
+  item_name_en: string;
+  item_name_ar?: string;
+  generic_name?: string;
+  producer?: string;
+  barcode?: string;
+  current_stock: number;
+  min_stock: number;
+  max_stock: number;
+  consumer_price: number;
+  buy_price: number;
+  discount_pct: number;
+  package_units: number;
+  sold_last_30d: number;
+  sold_last_90d: number;
+  daily_velocity: number;
+  monthly_velocity: number;
+  days_of_cover: number | null;
+  suggested_order_qty: number;
+  urgency: 'OUT_OF_STOCK' | 'LOW_COVER' | 'BELOW_MIN' | 'DRAFT';
+  in_manual_draft: boolean;
+  best_supplier_id?: number | null;
+  best_supplier_name?: string;
+  best_discount_pct?: number;
+  best_net_cost?: number;
+  last_purchase_date?: string;
+}
+
+export interface ItemVelocityAndBestSupplierReport {
+  item_id: number;
+  item_name_en: string;
+  current_stock: number;
+  min_stock: number;
+  max_stock: number;
+  sold_last_30d: number;
+  sold_last_90d: number;
+  daily_velocity: number;
+  monthly_velocity: number;
+  days_remaining: number | null;
+  suggested_order_qty: number;
+  best_supplier: SupplierPurchaseHistoryOffer | null;
+  recent_purchases: SupplierPurchaseHistoryOffer[];
 }
 
 export interface ItemBarcodeEntry {

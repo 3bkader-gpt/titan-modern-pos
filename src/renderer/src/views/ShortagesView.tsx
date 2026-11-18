@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ShortageItem, Supplier, Item } from '../../../shared/types';
 import { ExportExcelButton } from '../components/common/ExportExcelButton';
+import { SmartShortagesTab } from '../components/shortages/SmartShortagesTab';
 import { 
   ClipboardList, 
   Search, 
@@ -68,6 +69,7 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
   const [savingAdd, setSavingAdd] = useState<boolean>(false);
 
   // Status message
+  const [viewMode, setViewMode] = useState<'smart' | 'manual_drafts'>('smart');
   const [toastMessage, setToastMessage] = useState<{
     text: string;
     type: 'success' | 'error';
@@ -448,6 +450,32 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
           </div>
         </div>
 
+        {/* Tab Switcher: Smart Shortages vs Legacy Manual Drafts */}
+        <div className="flex flex-wrap items-center gap-1.5 mt-3 pt-3 border-t border-slate-100 text-xs">
+          <button
+            type="button"
+            onClick={() => setViewMode('smart')}
+            className={`px-3.5 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
+              viewMode === 'smart'
+                ? 'bg-blue-600 text-white shadow-2xs'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            }`}
+          >
+            النواقص الذكية ومعدل السحب وأفضل مورد
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('manual_drafts')}
+            className={`px-3.5 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
+              viewMode === 'manual_drafts'
+                ? 'bg-blue-600 text-white shadow-2xs'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            }`}
+          >
+            مسودات النواقص اليدوية ({shortages.length.toLocaleString('en-US')})
+          </button>
+        </div>
+
         {/* Toast */}
         {toastMessage && (
           <div
@@ -465,8 +493,10 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
         )}
       </div>
 
-      {/* 4. Shortages Table */}
-      <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs overflow-hidden">
+      {viewMode === 'smart' ? (
+        <SmartShortagesTab suppliers={suppliers} onTransferToPurchases={onTransferToPurchases} />
+      ) : (
+        <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-right text-xs">
             <thead>
@@ -749,6 +779,7 @@ export const ShortagesView: React.FC<ShortagesViewProps> = ({
           </div>
         )}
       </div>
+      )}
 
       {/* Manual Add Shortage Modal */}
       {isAddModalOpen && (

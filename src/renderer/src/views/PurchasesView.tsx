@@ -5,7 +5,8 @@ import {
   PurchaseInvoiceItem, 
   Item, 
   CreatePurchaseInvoicePayload,
-  AuthSession
+  AuthSession,
+  ItemVelocityAndBestSupplierReport
 } from '../../../shared/types';
 import { SupplierStatementTab } from '../components/purchases/SupplierStatementTab';
 import { PurchaseReturnTab } from '../components/purchases/PurchaseReturnTab';
@@ -109,6 +110,17 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   const [barcodePrintItems, setBarcodePrintItems] = useState<BarcodeLabelPrintItem[] | null>(null);
   const [lastSavedPrintItems, setLastSavedPrintItems] = useState<BarcodeLabelPrintItem[] | null>(null);
   const [isExcelImportOpen, setIsExcelImportOpen] = useState<boolean>(false);
+  const [inspectedVelocity, setInspectedVelocity] = useState<ItemVelocityAndBestSupplierReport | null>(null);
+
+  const inspectItemVelocity = useCallback(async (itemId: number) => {
+    if (!window.electronAPI?.getItemVelocityAndBestSupplier) return;
+    try {
+      const report = await window.electronAPI.getItemVelocityAndBestSupplier(itemId);
+      setInspectedVelocity(report);
+    } catch {
+      // Ignore transient velocity inspect errors
+    }
+  }, []);
 
   // Add Supplier Modal state
   const [isAddSupplierOpen, setIsAddSupplierOpen] = useState<boolean>(false);
@@ -690,7 +702,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                   {searchResults.map((item) => (
                     <div
                       key={item.item_id}
-                      onClick={() => handleSelectItem(item)}
+                      onClick={() => {
+                        handleSelectItem(item);
+                        void inspectItemVelocity(item.item_id);
+                      }}
                       className="p-2.5 hover:bg-blue-50/70 cursor-pointer flex items-center justify-between text-xs transition-colors"
                     >
                       <div className="flex flex-col">
@@ -712,6 +727,31 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                 </div>
               )}
             </div>
+
+            {/* M8: Velocity & Best Historical Supplier Card */}
+            {inspectedVelocity && (
+              <div className="bg-indigo-50/80 border border-indigo-200 rounded-xl px-3.5 py-2 text-xs flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <strong className="text-indigo-950" dir="ltr">{inspectedVelocity.item_name_en}</strong>
+                  <span className="text-indigo-800 font-semibold">
+                    معدل السحب: <strong className="font-mono">{inspectedVelocity.monthly_velocity}</strong> علبة/شهر
+                    {inspectedVelocity.days_remaining !== null ? ` • يكفي ${inspectedVelocity.days_remaining} يوم` : ''}
+                  </span>
+                  {inspectedVelocity.best_supplier && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 font-bold">
+                      أفضل خصم سابق: {inspectedVelocity.best_supplier.discount_pct.toFixed(1)}% من {inspectedVelocity.best_supplier.supplier_name} (صافي {inspectedVelocity.best_supplier.net_unit_cost.toFixed(2)} ج.م)
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setInspectedVelocity(null)}
+                  className="text-indigo-500 hover:text-indigo-800 font-bold cursor-pointer"
+                >
+                  ×
+                </button>
+              </div>
+            )}
 
             {/* Receiving Items Table */}
             <div className="bg-white rounded-xl border border-slate-200/90 shadow-2xs overflow-hidden">
@@ -792,7 +832,11 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                           line.consumer_price !== line.original_consumer_price;
 
                         return (
-                          <tr key={`${line.item_id}-${idx}`} className="hover:bg-slate-50/60">
+                          <tr
+                            key={`${line.item_id}-${idx}`}
+                            onClick={() => void inspectItemVelocity(line.item_id)}
+                            className="hover:bg-slate-50/60 cursor-pointer"
+                          >
                             {/* Item Name */}
                             <td className="py-2 px-3">
                               <div className="flex flex-col">
