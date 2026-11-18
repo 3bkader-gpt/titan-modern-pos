@@ -17,11 +17,13 @@ import {
   TrendingUp, 
   CheckCircle2, 
   X,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Barcode
 } from 'lucide-react';
 import { ItemHistoryModal } from '../components/inventory/ItemHistoryModal';
 import { EditStockModal } from '../components/inventory/EditStockModal';
 import { DrugEyeSubstituteModal } from '../components/pos/DrugEyeSubstituteModal';
+import { BarcodeLabelModal, BarcodeLabelPrintItem } from '../components/inventory/BarcodeLabelModal';
 
 export const CatalogInventoryView: React.FC = () => {
   // State
@@ -43,6 +45,7 @@ export const CatalogInventoryView: React.FC = () => {
     consumer_price: number;
     package_units?: number;
   } | null>(null);
+  const [barcodePrintItems, setBarcodePrintItems] = useState<BarcodeLabelPrintItem[] | null>(null);
 
   // Search debounce ref
   const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -462,6 +465,26 @@ export const CatalogInventoryView: React.FC = () => {
                             <History className="w-3.5 h-3.5" />
                           </button>
 
+                          {/* Print Thermal Barcode Labels */}
+                          <button
+                            onClick={() =>
+                              setBarcodePrintItems([
+                                {
+                                  item_id: item.item_id,
+                                  item_name: item.item_name_en,
+                                  consumer_price: item.consumer_price,
+                                  barcode: item.barcode,
+                                  expiry_date: item.expiry_date,
+                                  copies: 1
+                                }
+                              ])
+                            }
+                            className="p-1.5 rounded-md hover:bg-emerald-100 text-emerald-600 hover:text-emerald-800 transition-colors"
+                            title="طباعة باركود حراري + إدارة تعدد الباركود"
+                          >
+                            <Barcode className="w-3.5 h-3.5" />
+                          </button>
+
                           {/* DrugEye Alternatives */}
                           <button
                             onClick={() => setSubstituteItem({
@@ -566,6 +589,16 @@ export const CatalogInventoryView: React.FC = () => {
           setSubstituteItem(null);
           // Highlight or open full history/edit for the selected substitute
           setHistoryItemId(newItem.item_id);
+        }}
+      />
+
+      {/* M5: Thermal Barcode Label Print & Multi-Barcode Modal */}
+      <BarcodeLabelModal
+        isOpen={!!barcodePrintItems}
+        items={barcodePrintItems || []}
+        onClose={() => {
+          setBarcodePrintItems(null);
+          void loadData();
         }}
       />
     </div>

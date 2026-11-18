@@ -54,7 +54,11 @@ import {
   checkCanEditSaleInvoice,
   getSaleInvoiceForEdit,
   updateSavedSaleInvoice,
-  getInvoiceRevisions
+  getInvoiceRevisions,
+  getItemBarcodes,
+  addItemBarcode,
+  removeItemBarcode,
+  ensureItemHasBarcode
 } from './db';
 import { 
   performBackup, 
@@ -392,6 +396,23 @@ function registerIpcHandlers() {
 
   ipcMain.handle('pos:getInvoiceRevisions', async (_event, invoiceNumber: number) => {
     return getInvoiceRevisions(invoiceNumber);
+  });
+
+  // Module 5: Multi-Barcode & Thermal Label Handlers
+  ipcMain.handle('inv:getItemBarcodes', async (_event, itemId: number) => {
+    return getItemBarcodes(itemId);
+  });
+
+  ipcMain.handle('inv:addItemBarcode', async (_event, itemId: number, barcode: string, label?: string) => {
+    return addItemBarcode(itemId, barcode, label);
+  });
+
+  ipcMain.handle('inv:removeItemBarcode', async (_event, id: number) => {
+    return removeItemBarcode(id);
+  });
+
+  ipcMain.handle('inv:ensureItemBarcode', async (_event, itemId: number) => {
+    return ensureItemHasBarcode(itemId);
   });
 }
 

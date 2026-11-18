@@ -9,6 +9,7 @@ import {
 } from '../../../shared/types';
 import { SupplierStatementTab } from '../components/purchases/SupplierStatementTab';
 import { PurchaseReturnTab } from '../components/purchases/PurchaseReturnTab';
+import { BarcodeLabelModal, BarcodeLabelPrintItem } from '../components/inventory/BarcodeLabelModal';
 import { 
   Truck, 
   Plus, 
@@ -31,7 +32,8 @@ import {
   Save,
   Check,
   RotateCcw,
-  Wallet
+  Wallet,
+  Barcode
 } from 'lucide-react';
 
 interface PurchasesViewProps {
@@ -101,6 +103,8 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     items: PurchaseInvoiceItem[];
   } | null>(null);
   const [loadingDetails, setLoadingDetails] = useState<boolean>(false);
+  const [barcodePrintItems, setBarcodePrintItems] = useState<BarcodeLabelPrintItem[] | null>(null);
+  const [lastSavedPrintItems, setLastSavedPrintItems] = useState<BarcodeLabelPrintItem[] | null>(null);
 
   // Add Supplier Modal state
   const [isAddSupplierOpen, setIsAddSupplierOpen] = useState<boolean>(false);
@@ -368,6 +372,16 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
           text: `تم استلام الفاتورة رقم #${res.purchase_invoice_id} بنجاح! تم تحديث رصيد ${res.item_count} صنفاً، وتنظيف النواقص الموردة، وتسجيل القيد المالي (${res.total_amount.toFixed(2)} ج.م).`,
           type: 'success'
         });
+
+        setLastSavedPrintItems(
+          draftLines.map((l) => ({
+            item_id: l.item_id,
+            item_name: l.item_name_en,
+            consumer_price: l.consumer_price,
+            expiry_date: l.expiry_date,
+            copies: Math.max(1, Math.round((l.quantity || 1) + (l.bonus_quantity || 0)))
+          }))
+        );
 
         window.dispatchEvent(new Event('refresh-app-stats'));
 
@@ -957,6 +971,33 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
               <p className="text-[10px] text-slate-400 text-center leading-relaxed">
                 تنفذ العملية داخل SQLite Transaction ذرية: زيادة الرصيد، تحديث السعر والصلاحية، وتنظيف النواقص تلقائياً.
               </p>
+
+              {(draftLines.length > 0 || (lastSavedPrintItems && lastSavedPrintItems.length > 0)) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (draftLines.length > 0) {
+                      setBarcodePrintItems(
+                        draftLines.map((l) => ({
+                          item_id: l.item_id,
+                          item_name: l.item_name_en,
+                          consumer_price: l.consumer_price,
+                          expiry_date: l.expiry_date,
+                          copies: Math.max(1, Math.round((l.quantity || 1) + (l.bonus_quantity || 0)))
+                        }))
+                      );
+                    } else if (lastSavedPrintItems) {
+                      setBarcodePrintItems(lastSavedPrintItems);
+                    }
+                  }}
+                  className="w-full py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Barcode className="w-4 h-4 text-blue-600" />
+                  <span>
+                    {draftLines.length > 0 ? 'طباعة باركود أصناف المسودة' : 'طباعة باركود آخر فاتورة محفوظة'}
+                  </span>
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1216,12 +1257,32 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
             </div>
 
             <div className="px-6 py-3 bg-slate-50 border-t border-slate-200 flex justify-between items-center text-xs">
-              <span className="font-bold text-slate-700">
-                إجمالي قيمة الفاتورة:
-              </span>
-              <span className="font-mono font-extrabold text-blue-700 text-sm">
-                {selectedInvoiceDetails.invoice.total_amount.toFixed(2)} ج.م
-              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  setBarcodePrintItems(
+                    selectedInvoiceDetails.items.map((it) => ({
+                      item_id: it.item_id,
+                      item_name: it.item_name,
+                      consumer_price: it.consumer_price,
+                      expiry_date: it.expiry_date,
+                      copies: Math.max(1, Math.round((it.quantity || 1) + (it.bonus_quantity || 0)))
+                    }))
+                  )
+                }
+                className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 font-bold flex items-center gap-1.5 cursor-pointer"
+              >
+                <Barcode className="w-3.5 h-3.5" />
+                <span>طباعة باركود الفاتورة</span>
+              </button>
+              <div className="flex items-center gap-3">
+                <span className="font-bold text-slate-700">
+                  إجمالي قيمة الفاتورة:
+                </span>
+                <span className="font-mono font-extrabold text-blue-700 text-sm">
+                  {selectedInvoiceDetails.invoice.total_amount.toFixed(2)} ج.م
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -1310,6 +1371,12 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
           </form>
         </div>
       )}
+      {/* M5: Thermal Barcode Labels Modal */}
+      <BarcodeLabelModal
+        isOpen={!!barcodePrintItems}
+        items={barcodePrintItems || []}
+        onClose={() => setBarcodePrintItems(null)}
+      />
     </div>
   );
 };

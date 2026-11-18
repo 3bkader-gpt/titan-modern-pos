@@ -427,6 +427,15 @@ export interface SaveItemPayload {
   temp_price_active?: number;
 }
 
+export interface ItemBarcodeEntry {
+  id: number;
+  item_id: number;
+  barcode: string;
+  label: string;
+  is_primary: number;
+  created_at: string;
+}
+
 // Phase 4: Treasury, Shifts, Customers & Delivery, Financial & Audit Reports
 export interface LedgerEntry {
   entry_id: number;

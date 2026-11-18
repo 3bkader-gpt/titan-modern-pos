@@ -45,7 +45,8 @@ import {
   InvoiceEditEligibility,
   EditableSaleInvoiceData,
   UpdateSaleInvoicePayload,
-  InvoiceRevisionEntry
+  InvoiceRevisionEntry,
+  ItemBarcodeEntry
 } from '../shared/types';
 
 export const electronAPI = {
@@ -255,7 +256,20 @@ export const electronAPI = {
     ipcRenderer.invoke('pos:updateSavedInvoice', payload),
 
   getInvoiceRevisions: (invoiceNumber: number): Promise<InvoiceRevisionEntry[]> =>
-    ipcRenderer.invoke('pos:getInvoiceRevisions', invoiceNumber)
+    ipcRenderer.invoke('pos:getInvoiceRevisions', invoiceNumber),
+
+  // Module 5: Multi-Barcode & Thermal Label APIs
+  getItemBarcodes: (itemId: number): Promise<ItemBarcodeEntry[]> =>
+    ipcRenderer.invoke('inv:getItemBarcodes', itemId),
+
+  addItemBarcode: (itemId: number, barcode: string, label?: string): Promise<ItemBarcodeEntry> =>
+    ipcRenderer.invoke('inv:addItemBarcode', itemId, barcode, label),
+
+  removeItemBarcode: (id: number): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('inv:removeItemBarcode', id),
+
+  ensureItemHasBarcode: (itemId: number): Promise<string> =>
+    ipcRenderer.invoke('inv:ensureItemBarcode', itemId)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

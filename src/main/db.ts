@@ -49,6 +49,7 @@ import {
   UpdateSaleInvoicePayload,
   InvoiceRevisionEntry,
   DiscountMode,
+  ItemBarcodeEntry,
   AuditLogs,
   LedgerIntegrityStatus
 } from '../shared/types';
@@ -310,6 +311,24 @@ function ensureSchemaUpgrades(database: Database.Database) {
     safeAddColumn('sales_invoices', 'discount_input_value REAL DEFAULT 0');
     safeAddColumn('sales_invoices', "override_manager_name TEXT DEFAULT ''");
     safeAddColumn('sales_invoice_items', "applied_price_source TEXT DEFAULT 'CONSUMER'");
+
+    // M5: Multi-Barcode Mapping Table & Initial Sync
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS item_barcodes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER NOT NULL,
+        barcode TEXT NOT NULL UNIQUE,
+        label TEXT DEFAULT 'عبوة',
+        is_primary INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(item_id) REFERENCES items(item_id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_item_barcodes_code ON item_barcodes(barcode);
+      CREATE INDEX IF NOT EXISTS idx_item_barcodes_item ON item_barcodes(item_id);
+      INSERT OR IGNORE INTO item_barcodes (item_id, barcode, label, is_primary, created_at)
+      SELECT item_id, TRIM(barcode), 'باركود أساسي', 1, '2026-11-18'
+      FROM items WHERE barcode IS NOT NULL AND TRIM(barcode) != '';
+    `);
 
     // Ensure Dr. Mariam Elhomeily account exists in users table
     const existingDoctor = database.prepare("SELECT * FROM users WHERE user_name LIKE '%مريم%' OR user_name LIKE '%الحميلي%'").get();
@@ -594,13 +613,24 @@ export function searchItems(query: string, filterInStockOnly: boolean = false, l
     return database.prepare(sql).all(limit) as Item[];
   }
 
-  // 1. Direct barcode & GS1 DataMatrix / GTIN-14 exact match check (instant index lookup)
+  // 1. Direct barcode & GS1 DataMatrix / GTIN-14 exact match check (items + multi-barcode item_barcodes)
   const barcodeCandidates = extractBarcodeCandidates(query);
   if (barcodeCandidates.length > 0) {
     const placeholders = barcodeCandidates.map(() => '?').join(', ');
-    const barcodeMatch = database
+    let barcodeMatch = database
       .prepare(`SELECT * FROM items WHERE barcode IN (${placeholders}) LIMIT 1`)
       .get(...barcodeCandidates) as Item | undefined;
+    if (!barcodeMatch) {
+      barcodeMatch = database
+        .prepare(`
+          SELECT i.*
+          FROM item_barcodes ib
+          JOIN items i ON ib.item_id = i.item_id
+          WHERE ib.barcode IN (${placeholders})
+          LIMIT 1
+        `)
+        .get(...barcodeCandidates) as Item | undefined;
+    }
     if (barcodeMatch) {
       if (!filterInStockOnly || barcodeMatch.current_stock > 0) {
         return [barcodeMatch];
@@ -4803,6 +4833,93 @@ export function getInvoiceRevisions(invoiceNumber: number): InvoiceRevisionEntry
     ORDER BY revision_number DESC
   `).all(invoiceNumber) as InvoiceRevisionEntry[];
 }
+
+// ============================================================================
+// MODULE 5: MULTI-BARCODE MANAGEMENT & INTERNAL BARCODE GENERATION
+// ============================================================================
+
+export function getItemBarcodes(itemId: number): ItemBarcodeEntry[] {
+  const database = getDatabaseInstance();
+  return database.prepare(`
+    SELECT * FROM item_barcodes
+    WHERE item_id = ?
+    ORDER BY is_primary DESC, id ASC
+  `).all(itemId) as ItemBarcodeEntry[];
+}
+
+export function addItemBarcode(itemId: number, barcode: string, label: string = 'باركود إضافي'): ItemBarcodeEntry {
+  const database = getDatabaseInstance();
+  const cleanCode = normalizeArabicDigits(String(barcode || '')).trim();
+  if (!cleanCode) {
+    throw new Error('يرجى إدخال قيمة الباركود.');
+  }
+  const item = database.prepare('SELECT item_id FROM items WHERE item_id = ?').get(itemId);
+  if (!item) {
+    throw new Error(`الصنف رقم #${itemId} غير موجود.`);
+  }
+
+  const existingOwner = database
+    .prepare('SELECT item_id FROM item_barcodes WHERE barcode = ? LIMIT 1')
+    .get(cleanCode) as { item_id: number } | undefined;
+  if (existingOwner) {
+    if (existingOwner.item_id === itemId) {
+      return database
+        .prepare('SELECT * FROM item_barcodes WHERE barcode = ? LIMIT 1')
+        .get(cleanCode) as ItemBarcodeEntry;
+    }
+    throw new Error(`الباركود "${cleanCode}" مسجل بالفعل لصنف آخر (#${existingOwner.item_id}).`);
+  }
+
+  const { timestamp } = getLocalDateTime();
+  const res = database.prepare(`
+    INSERT INTO item_barcodes (item_id, barcode, label, is_primary, created_at)
+    VALUES (?, ?, ?, 0, ?)
+  `).run(itemId, cleanCode, label.trim() || 'باركود إضافي', timestamp);
+
+  return database.prepare('SELECT * FROM item_barcodes WHERE id = ?').get(Number(res.lastInsertRowid)) as ItemBarcodeEntry;
+}
+
+export function removeItemBarcode(id: number): { success: boolean } {
+  const database = getDatabaseInstance();
+  const row = database.prepare('SELECT is_primary FROM item_barcodes WHERE id = ?').get(id) as { is_primary: number } | undefined;
+  if (!row) {
+    return { success: false };
+  }
+  if (row.is_primary === 1) {
+    throw new Error('لا يمكن حذف الباركود الأساسي من هنا؛ يمكنك تعديله من بطاقة الصنف.');
+  }
+  database.prepare('DELETE FROM item_barcodes WHERE id = ?').run(id);
+  return { success: true };
+}
+
+export function ensureItemHasBarcode(itemId: number): string {
+  const database = getDatabaseInstance();
+  const item = database
+    .prepare('SELECT item_id, barcode FROM items WHERE item_id = ?')
+    .get(itemId) as { item_id: number; barcode?: string | null } | undefined;
+  if (!item) {
+    throw new Error(`الصنف رقم #${itemId} غير موجود.`);
+  }
+
+  const existing = String(item.barcode || '').trim();
+  if (existing) {
+    return existing;
+  }
+
+  const generated = `98${String(itemId).padStart(10, '0')}`;
+  const { timestamp } = getLocalDateTime();
+  const tx = database.transaction(() => {
+    database.prepare('UPDATE items SET barcode = ? WHERE item_id = ?').run(generated, itemId);
+    database.prepare(`
+      INSERT OR IGNORE INTO item_barcodes (item_id, barcode, label, is_primary, created_at)
+      VALUES (?, ?, 'باركود داخلي مولّد', 1, ?)
+    `).run(itemId, generated, timestamp);
+  });
+  tx();
+
+  return generated;
+}
+
 
 
 
