@@ -20,6 +20,23 @@ export interface Item {
   barcode_source?: string | null;
   pharmacy_discount_percent?: number | null;
   tax_schedule_category?: number | null;
+  short_code?: string | null;
+  phonetic_key?: string | null;
+  last_sold_at?: string | null;
+  last_bought_at?: string | null;
+}
+
+export type SearchScope = 'ALL' | 'OUR_LIST' | 'IN_STOCK';
+
+export interface AdvancedDrugSearchFilter {
+  query?: string;
+  scope?: SearchScope;
+  genericName?: string;
+  producer?: string;
+  minPrice?: number | null;
+  maxPrice?: number | null;
+  shortCode?: string;
+  limit?: number;
 }
 
 export interface MedicalAlert {
@@ -425,6 +442,7 @@ export interface SaveItemPayload {
   tax_schedule_category?: number;
   temp_price?: number;
   temp_price_active?: number;
+  short_code?: string | null;
 }
 
 export interface ItemBarcodeEntry {

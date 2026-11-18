@@ -46,7 +46,8 @@ import {
   EditableSaleInvoiceData,
   UpdateSaleInvoicePayload,
   InvoiceRevisionEntry,
-  ItemBarcodeEntry
+  ItemBarcodeEntry,
+  AdvancedDrugSearchFilter
 } from '../shared/types';
 
 export const electronAPI = {
@@ -269,7 +270,11 @@ export const electronAPI = {
     ipcRenderer.invoke('inv:removeItemBarcode', id),
 
   ensureItemHasBarcode: (itemId: number): Promise<string> =>
-    ipcRenderer.invoke('inv:ensureItemBarcode', itemId)
+    ipcRenderer.invoke('inv:ensureItemBarcode', itemId),
+
+  // Module 6: 9-Method Advanced Drug Finder API
+  advancedSearchItems: (filter: AdvancedDrugSearchFilter): Promise<Item[]> =>
+    ipcRenderer.invoke('db:advancedSearchItems', filter)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

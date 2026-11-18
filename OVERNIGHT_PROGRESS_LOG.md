@@ -20,7 +20,7 @@
 | **M3** | S1 | فك الحفظ وتعديل فواتير نفس اليوم | ✅ DONE | `scripts/verify_m3.ts` | `0.00 EGP` | `feat(m3)` | 2026-11-18 02:27 | التعديل في نفس اليوم بنفس `#N` + حارس الدرج + `invoice_revisions_log` |
 | **M4** | S1 | التسعير الذكي + خصم % الربح + السعر المؤقت + حارس التكلفة | ✅ DONE | `scripts/verify_m4.ts` | `0.00 EGP` | `feat(m4)` | 2026-11-18 02:34 | `PROFIT_PCT` + حارس تحت التكلفة + `temp_price` + تغليف Sprint 1 |
 | **M5** | S2 | طباعة ليبل الباركود الحراري Code-128 + تعدد الباركود | ✅ DONE | `scripts/verify_m5.ts` | `0.00 EGP` | `feat(m5)` | 2026-11-18 02:41 | Twin `38×12.5mm` (`TWIN_38x12`) + `item_barcodes` + جرد وطباعة المشتريات |
-| **M6** | S2 | محرك البحث المتقدم بـ 9 طرق (`Ctrl+F`) | ⏳ PENDING | `scripts/verify_m6.ts` | — | — | — | `.685` / `AU*600` / `=OJMANTYN` / 3 Scopes |
+| **M6** | S2 | محرك البحث المتقدم بـ 9 طرق (`Ctrl+F`) | ✅ DONE | `scripts/verify_m6.ts` | `0.00 EGP` | `feat(m6)` | 2026-11-18 02:49 | `.685` / `AU*625` / `=OJMANTYN` / 3 Scopes |
 | **M7** | S2 | استيراد فواتير Excel/CSV وتصدير التقارير الشامل | ⏳ PENDING | `scripts/verify_m7.ts` | — | — | — | + تغليف Sprint 2 (`package:dir` ← `F:\app`) |
 | **M8** | S3 | النواقص الذكية + حد الطلب + معدل السحب وأفضل مورد | ⏳ PENDING | `scripts/verify_m8.ts` | — | — | — | `min_stock`/`max_stock` + ترشيح المخزن |
 | **M9** | S3 | الجرد بالدولاب + مخاطر الإكسباير + دمج المكرر + مراقب السلامة | ⏳ PENDING | `scripts/verify_m9.ts` | — | — | — | + تغليف Sprint 3 (`package:dir` ← `F:\app`) |
@@ -36,3 +36,4 @@
 - `2026-11-18 02:27`: إتمام **M3** واجتياز `gate:post -- M3` (`verify_m1..m3.ts`, توازن GL `0.00 EGP`): فك الحفظ وتعديل فواتير نفس اليوم بنفس `#N` مع حارس النقدية وسجل المراجعات.
 - `2026-11-18 02:34`: إتمام **M4** واجتياز `gate:post -- M4` (`verify_m1..m4.ts`, توازن GL `0.00 EGP`): محرك التسعير المشترك (`AMOUNT` / `TOTAL_PCT` / `PROFIT_PCT` / `WHOLESALE_COST`)، حارس البيع تحت التكلفة وتجاوز خصم الكاشير، والسعر المؤقت المزدوج + تغليف Sprint 1.
 - `2026-11-18 02:41`: إتمام **M5** واجتياز `gate:post -- M5` (`verify_m1..m5.ts`, توازن GL `0.00 EGP`): مولّد Code-128 النقي (`src/shared/code128.ts`)، جدول الباركودات المتعددة `item_barcodes` وبحث الكاشير، ونافذة طباعة الملصق الحراري (`TWIN_38x12` و`SINGLE_38x25` و`SINGLE_50x25`) في المخزون والمشتريات.
+- `2026-11-18 02:49`: إتمام **M6** واجتياز `gate:post -- M6` (`verify_m1..m6.ts`, توازن GL `0.00 EGP`): محرك البحث المتقدم بـ 9 طرق (`src/shared/phonetic.ts`, `advancedSearchItems`) الداعم للبحث الصوتي `=OJMANTYN`/`=AGMENTIN`، النجوم `AU*625`، نهاية الباركود `.1286`، الكود المختصر، النطاقات الثلاثة (`ALL`/`OUR_LIST`/`IN_STOCK`)، ونافذة `Ctrl+F` (`AdvancedDrugFinderModal.tsx`).

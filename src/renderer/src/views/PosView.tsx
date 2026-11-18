@@ -57,12 +57,16 @@ interface PosViewProps {
   currentUser?: AuthSession | null;
   pendingEditInvoice?: { data: EditableSaleInvoiceData; overridePin?: string } | null;
   onClearPendingEditInvoice?: () => void;
+  pendingFinderItem?: { item: Item; unitType?: 'pack' | 'unit'; ts: number } | null;
+  onClearPendingFinderItem?: () => void;
 }
 
 export const PosView: React.FC<PosViewProps> = ({
   currentUser,
   pendingEditInvoice,
-  onClearPendingEditInvoice
+  onClearPendingEditInvoice,
+  pendingFinderItem,
+  onClearPendingFinderItem
 }) => {
   // 1. Multi-Tab Carts State
   const [tabs, setTabs] = useState<ActiveCartTab[]>([
@@ -154,6 +158,12 @@ export const PosView: React.FC<PosViewProps> = ({
     onClearPendingEditInvoice?.();
     showNotification(`تم تحميل الفاتورة #${inv.invoice_number} في وضع التعديل`, 'info');
   }, [pendingEditInvoice, onClearPendingEditInvoice]);
+
+  useEffect(() => {
+    if (!pendingFinderItem) return;
+    void handleAddItem(pendingFinderItem.item, pendingFinderItem.unitType || 'pack');
+    onClearPendingFinderItem?.();
+  }, [pendingFinderItem, onClearPendingFinderItem]);
 
   const updateCurrentTab = (updater: (prev: ActiveCartTab) => ActiveCartTab, targetTabId?: number) => {
     const targetId = targetTabId ?? activeTabId;

@@ -12,7 +12,8 @@ import { ReportsAnalyticsView } from './views/ReportsAnalyticsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { DataLocationModal } from './components/DataLocationModal';
 import { LoginScreen } from './components/auth/LoginScreen';
-import { DashboardStats, BackupStatus, StorageInfo, AuthSession, EditableSaleInvoiceData } from '../../shared/types';
+import { AdvancedDrugFinderModal } from './components/pos/AdvancedDrugFinderModal';
+import { DashboardStats, BackupStatus, StorageInfo, AuthSession, EditableSaleInvoiceData, Item } from '../../shared/types';
 import { CheckCircle2, AlertCircle, X } from 'lucide-react';
 
 const AUTH_SESSION_STORAGE_KEY = 'titan_auth_session';
@@ -55,6 +56,12 @@ export const App: React.FC = () => {
   const [pendingEditInvoice, setPendingEditInvoice] = useState<{
     data: EditableSaleInvoiceData;
     overridePin?: string;
+  } | null>(null);
+  const [showAdvancedFinderModal, setShowAdvancedFinderModal] = useState<boolean>(false);
+  const [pendingFinderItem, setPendingFinderItem] = useState<{
+    item: Item;
+    unitType?: 'pack' | 'unit';
+    ts: number;
   } | null>(null);
 
   const showToast = useCallback((message: string, type: 'success' | 'info' | 'error' = 'info') => {
@@ -206,8 +213,15 @@ export const App: React.FC = () => {
     };
   }, [loadStats, loadBackupStatus, loadStorageInfo]);
 
-  // Global Keyboard Navigation (F1, F3-F7, Ctrl+L & Esc)
+  // Global Keyboard Navigation (F1, F3-F7, Ctrl+F, Ctrl+L & Esc)
   useEffect(() => {
+    const handleOpenFinderEvent = () => {
+      if (currentUser && !showSwitchUserModal) {
+        setShowAdvancedFinderModal(true);
+      }
+    };
+    window.addEventListener('titan-open-advanced-finder', handleOpenFinderEvent);
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey && (e.code === 'KeyL' || e.key.toLowerCase() === 'l')) {
         e.preventDefault();
@@ -216,6 +230,12 @@ export const App: React.FC = () => {
       }
 
       if (!currentUser || showSwitchUserModal) {
+        return;
+      }
+
+      if (e.ctrlKey && (e.code === 'KeyF' || e.key.toLowerCase() === 'f')) {
+        e.preventDefault();
+        setShowAdvancedFinderModal(true);
         return;
       }
 
@@ -265,7 +285,10 @@ export const App: React.FC = () => {
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('titan-open-advanced-finder', handleOpenFinderEvent);
+    };
   }, [activeTab, currentUser, showSwitchUserModal, canAccessTab, navigateToTab]);
 
   return (
@@ -301,6 +324,8 @@ export const App: React.FC = () => {
                   currentUser={currentUser}
                   pendingEditInvoice={pendingEditInvoice}
                   onClearPendingEditInvoice={() => setPendingEditInvoice(null)}
+                  pendingFinderItem={pendingFinderItem}
+                  onClearPendingFinderItem={() => setPendingFinderItem(null)}
                 />
               </ErrorBoundary>
             </div>
@@ -360,6 +385,19 @@ export const App: React.FC = () => {
         storageInfo={storageInfo}
         onClose={() => setIsStorageModalOpen(false)}
         onUpdated={handleStorageUpdated}
+      />
+
+      {/* Module 6: 9-Method Advanced Drug Finder Modal (Ctrl+F) */}
+      <AdvancedDrugFinderModal
+        isOpen={showAdvancedFinderModal}
+        onClose={() => setShowAdvancedFinderModal(false)}
+        onSelectItem={(item, unitType) => {
+          setPendingFinderItem({ item, unitType, ts: Date.now() });
+          if (activeTab !== 'pos' && canAccessTab('pos', currentUser)) {
+            navigateToTab('pos');
+          }
+          showToast(`تمت إضافة ${item.item_name_en} إلى الكاشير`, 'success');
+        }}
       />
 
       {/* Toast Notification */}

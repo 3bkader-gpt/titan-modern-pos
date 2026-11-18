@@ -50,10 +50,13 @@ import {
   InvoiceRevisionEntry,
   DiscountMode,
   ItemBarcodeEntry,
+  SearchScope,
+  AdvancedDrugSearchFilter,
   AuditLogs,
   LedgerIntegrityStatus
 } from '../shared/types';
 import { calculateInvoicePricing } from '../shared/pricing';
+import { computePhoneticKey, toWildcardSqlPattern } from '../shared/phonetic';
 
 let db: Database.Database | null = null;
 let activeDbFilePath: string | null = null;
@@ -330,6 +333,56 @@ function ensureSchemaUpgrades(database: Database.Database) {
       FROM items WHERE barcode IS NOT NULL AND TRIM(barcode) != '';
     `);
 
+    // M6: 9-Method Advanced Drug Finder Columns & Idempotent Backfill
+    safeAddColumn('items', "short_code TEXT DEFAULT ''");
+    safeAddColumn('items', "phonetic_key TEXT DEFAULT ''");
+    safeAddColumn('items', "last_sold_at TEXT DEFAULT ''");
+    safeAddColumn('items', "last_bought_at TEXT DEFAULT ''");
+
+    database.exec(`
+      CREATE INDEX IF NOT EXISTS idx_items_short_code ON items(short_code);
+      CREATE INDEX IF NOT EXISTS idx_items_phonetic_key ON items(phonetic_key);
+    `);
+
+    const missingPhoneticCount = (
+      database.prepare("SELECT COUNT(*) as cnt FROM items WHERE phonetic_key IS NULL OR phonetic_key = ''").get() as { cnt: number }
+    ).cnt;
+    if (missingPhoneticCount > 0) {
+      const rows = database
+        .prepare("SELECT item_id, item_name_en, item_name_ar FROM items WHERE phonetic_key IS NULL OR phonetic_key = ''")
+        .all() as Array<{ item_id: number; item_name_en: string; item_name_ar: string }>;
+      const updatePhoneticStmt = database.prepare('UPDATE items SET phonetic_key = ? WHERE item_id = ?');
+      const soldRows = database
+        .prepare('SELECT item_id, MAX(invoice_date) as last_d FROM sales_invoice_items GROUP BY item_id')
+        .all() as Array<{ item_id: number; last_d: string }>;
+      const boughtRows = database
+        .prepare(`
+          SELECT pii.item_id, MAX(pi.invoice_date) as last_d
+          FROM purchase_invoice_items pii
+          JOIN purchases_invoices pi ON pii.purchase_invoice_id = pi.purchase_invoice_id
+          GROUP BY pii.item_id
+        `)
+        .all() as Array<{ item_id: number; last_d: string }>;
+      const updateSoldStmt = database.prepare("UPDATE items SET last_sold_at = ? WHERE item_id = ? AND (last_sold_at IS NULL OR last_sold_at = '')");
+      const updateBoughtStmt = database.prepare("UPDATE items SET last_bought_at = ? WHERE item_id = ? AND (last_bought_at IS NULL OR last_bought_at = '')");
+
+      const txBackfill = database.transaction(() => {
+        for (const r of rows) {
+          const enKey = computePhoneticKey(r.item_name_en || '');
+          const arKey = computePhoneticKey(r.item_name_ar || '');
+          const combined = arKey ? `${enKey} ${arKey}`.trim() : enKey;
+          updatePhoneticStmt.run(combined || String(r.item_id), r.item_id);
+        }
+        for (const s of soldRows) {
+          if (s.last_d) updateSoldStmt.run(s.last_d, s.item_id);
+        }
+        for (const b of boughtRows) {
+          if (b.last_d) updateBoughtStmt.run(b.last_d, b.item_id);
+        }
+      });
+      txBackfill();
+    }
+
     // Ensure Dr. Mariam Elhomeily account exists in users table
     const existingDoctor = database.prepare("SELECT * FROM users WHERE user_name LIKE '%مريم%' OR user_name LIKE '%الحميلي%'").get();
     if (!existingDoctor) {
@@ -598,123 +651,289 @@ function extractBarcodeCandidates(raw: string): string[] {
   return Array.from(candidates);
 }
 
-export function searchItems(query: string, filterInStockOnly: boolean = false, limit: number = 50): Item[] {
-  const database = getDatabaseInstance();
-  const trimmed = normalizeArabicDigits(query).trim();
+function buildDrugSearchScopeAndFilters(filter: AdvancedDrugSearchFilter): {
+  whereSql: string;
+  params: (string | number)[];
+  hasStructuredFilters: boolean;
+} {
+  const scope: SearchScope = filter.scope || 'ALL';
+  const clauses: string[] = [];
+  const params: (string | number)[] = [];
+  let hasStructuredFilters = false;
 
-  // If no query, return top items
-  if (!trimmed) {
-    const sql = `
-      SELECT * FROM items
-      ${filterInStockOnly ? 'WHERE current_stock > 0' : ''}
-      ORDER BY item_name_en ASC
-      LIMIT ?
-    `;
-    return database.prepare(sql).all(limit) as Item[];
+  if (scope === 'IN_STOCK') {
+    clauses.push('i.current_stock > 0');
+  } else if (scope === 'OUR_LIST') {
+    clauses.push("(i.current_stock > 0 OR COALESCE(i.last_bought_at, '') != '' OR COALESCE(i.last_sold_at, '') != '')");
   }
 
-  // 1. Direct barcode & GS1 DataMatrix / GTIN-14 exact match check (items + multi-barcode item_barcodes)
-  const barcodeCandidates = extractBarcodeCandidates(query);
+  if (filter.genericName && filter.genericName.trim()) {
+    clauses.push("UPPER(COALESCE(i.generic_name, '')) LIKE ?");
+    params.push(`%${filter.genericName.trim().toUpperCase()}%`);
+    hasStructuredFilters = true;
+  }
+
+  if (filter.producer && filter.producer.trim()) {
+    clauses.push("UPPER(COALESCE(i.producer, '')) LIKE ?");
+    params.push(`%${filter.producer.trim().toUpperCase()}%`);
+    hasStructuredFilters = true;
+  }
+
+  if (filter.minPrice !== undefined && filter.minPrice !== null && Number.isFinite(Number(filter.minPrice))) {
+    clauses.push('i.consumer_price >= ?');
+    params.push(Number(filter.minPrice));
+    hasStructuredFilters = true;
+  }
+
+  if (filter.maxPrice !== undefined && filter.maxPrice !== null && Number.isFinite(Number(filter.maxPrice))) {
+    clauses.push('i.consumer_price <= ?');
+    params.push(Number(filter.maxPrice));
+    hasStructuredFilters = true;
+  }
+
+  if (filter.shortCode && filter.shortCode.trim()) {
+    clauses.push("UPPER(TRIM(COALESCE(i.short_code, ''))) LIKE ?");
+    params.push(`${filter.shortCode.trim().toUpperCase()}%`);
+    hasStructuredFilters = true;
+  }
+
+  return {
+    whereSql: clauses.length > 0 ? clauses.join(' AND ') : '1=1',
+    params,
+    hasStructuredFilters
+  };
+}
+
+function searchByFts(
+  rawQuery: string,
+  scopeWhereSql: string,
+  scopeParams: (string | number)[],
+  limit: number,
+  excludeIds: number[] = []
+): Item[] {
+  const database = getDatabaseInstance();
+  const excludeClause = excludeIds.length > 0
+    ? `AND i.item_id NOT IN (${excludeIds.map(() => '?').join(', ')})`
+    : '';
+  const clean = rawQuery.replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, ' ').trim();
+
+  if (clean) {
+    const terms = clean.split(/\s+/).filter(Boolean);
+    const ftsQuery = terms.map(t => `"${t}"*`).join(' AND ');
+
+    try {
+      const ftsSql = `
+        SELECT i.*
+        FROM items_fts f
+        JOIN items i ON f.item_id = i.item_id
+        WHERE items_fts MATCH ?
+          AND ${scopeWhereSql}
+          ${excludeClause}
+        ORDER BY
+          (CASE WHEN i.current_stock > 0 THEN 0 ELSE 1 END),
+          i.item_name_en ASC
+        LIMIT ?
+      `;
+      const ftsResults = database
+        .prepare(ftsSql)
+        .all(ftsQuery, ...scopeParams, ...excludeIds, limit) as Item[];
+
+      if (ftsResults.length > 0) {
+        return ftsResults;
+      }
+    } catch {
+      // If FTS match has syntax quirk, fallback to LIKE
+    }
+  }
+
+  // Fallback to LIKE if FTS produced 0 results or query contains punctuation
+  const pattern = `%${rawQuery.trim()}%`;
+  const likeSql = `
+    SELECT i.* FROM items i
+    WHERE (
+      i.item_name_en LIKE ? OR
+      i.item_name_ar LIKE ? OR
+      COALESCE(i.generic_name, '') LIKE ? OR
+      COALESCE(i.producer, '') LIKE ? OR
+      COALESCE(i.barcode, '') LIKE ?
+    )
+      AND ${scopeWhereSql}
+      ${excludeClause}
+    ORDER BY (CASE WHEN i.current_stock > 0 THEN 0 ELSE 1 END), i.item_name_en ASC
+    LIMIT ?
+  `;
+  return database
+    .prepare(likeSql)
+    .all(pattern, pattern, pattern, pattern, pattern, ...scopeParams, ...excludeIds, limit) as Item[];
+}
+
+export function advancedSearchItems(filter: AdvancedDrugSearchFilter = {}): Item[] {
+  const database = getDatabaseInstance();
+  const limit = Math.min(200, Math.max(1, Number(filter.limit || 50)));
+  const rawQuery = String(filter.query || '');
+  const trimmed = normalizeArabicDigits(rawQuery).trim();
+  const { whereSql, params: baseParams, hasStructuredFilters } = buildDrugSearchScopeAndFilters(filter);
+
+  // 0. Empty query -> browse filtered items (in-stock prioritized)
+  if (!trimmed) {
+    return database
+      .prepare(`
+        SELECT i.* FROM items i
+        WHERE ${whereSql}
+        ORDER BY (CASE WHEN i.current_stock > 0 THEN 0 ELSE 1 END), i.item_name_en ASC
+        LIMIT ?
+      `)
+      .all(...baseParams, limit) as Item[];
+  }
+
+  // Method 3: Barcode Suffix Search (.685 / .1286)
+  if (trimmed.startsWith('.') && trimmed.slice(1).trim().length >= 2) {
+    const suffix = trimmed.slice(1).trim();
+    const suffixLike = `%${suffix}`;
+    return database
+      .prepare(`
+        SELECT i.* FROM items i
+        WHERE (
+          TRIM(COALESCE(i.barcode, '')) LIKE ? OR
+          EXISTS (
+            SELECT 1 FROM item_barcodes ib
+            WHERE ib.item_id = i.item_id AND TRIM(ib.barcode) LIKE ?
+          )
+        )
+          AND ${whereSql}
+        ORDER BY (CASE WHEN i.current_stock > 0 THEN 0 ELSE 1 END), i.item_name_en ASC
+        LIMIT ?
+      `)
+      .all(suffixLike, suffixLike, ...baseParams, limit) as Item[];
+  }
+
+  // Method 5: Phonetic / Forgiving Spelling Search (=OJMANTYN / =AGMENTIN)
+  if (trimmed.startsWith('=') && trimmed.slice(1).trim().length >= 2) {
+    const targetPhonetic = computePhoneticKey(trimmed.slice(1));
+    const tokens = targetPhonetic.split(' ').filter(Boolean);
+    if (tokens.length > 0) {
+      const tokenClauses = tokens.map(() => "COALESCE(i.phonetic_key, '') LIKE ?");
+      const tokenParams = tokens.map(t => `%${t}%`);
+      const primaryPrefix = `${tokens[0]}%`;
+      const phoneticHits = database
+        .prepare(`
+          SELECT i.* FROM items i
+          WHERE ${tokenClauses.join(' AND ')}
+            AND ${whereSql}
+          ORDER BY
+            (CASE WHEN COALESCE(i.phonetic_key, '') LIKE ? THEN 0 ELSE 1 END),
+            (CASE WHEN i.current_stock > 0 THEN 0 ELSE 1 END),
+            i.item_name_en ASC
+          LIMIT ?
+        `)
+        .all(...tokenParams, ...baseParams, primaryPrefix, limit) as Item[];
+      if (phoneticHits.length > 0) {
+        return phoneticHits;
+      }
+    }
+    return searchByFts(trimmed.slice(1), whereSql, baseParams, limit);
+  }
+
+  // Method 4: Wildcard Search (AU*625, PAN*EXT*)
+  if (trimmed.includes('*')) {
+    const wildcardPat = toWildcardSqlPattern(trimmed);
+    return database
+      .prepare(`
+        SELECT i.* FROM items i
+        WHERE (
+          UPPER(TRIM(COALESCE(i.item_name_en, ''))) LIKE UPPER(?) ESCAPE '\\' OR
+          TRIM(COALESCE(i.item_name_ar, '')) LIKE ? ESCAPE '\\' OR
+          UPPER(TRIM(COALESCE(i.generic_name, ''))) LIKE UPPER(?) ESCAPE '\\'
+        )
+          AND ${whereSql}
+        ORDER BY (CASE WHEN i.current_stock > 0 THEN 0 ELSE 1 END), i.item_name_en ASC
+        LIMIT ?
+      `)
+      .all(wildcardPat, wildcardPat, wildcardPat, ...baseParams, limit) as Item[];
+  }
+
+  // Method 9: Exact Barcode & GS1 DataMatrix / GTIN-14 check (items + item_barcodes)
+  const barcodeCandidates = extractBarcodeCandidates(rawQuery);
   if (barcodeCandidates.length > 0) {
     const placeholders = barcodeCandidates.map(() => '?').join(', ');
     let barcodeMatch = database
-      .prepare(`SELECT * FROM items WHERE barcode IN (${placeholders}) LIMIT 1`)
-      .get(...barcodeCandidates) as Item | undefined;
+      .prepare(`
+        SELECT i.* FROM items i
+        WHERE TRIM(COALESCE(i.barcode, '')) IN (${placeholders}) AND ${whereSql}
+        LIMIT 1
+      `)
+      .get(...barcodeCandidates, ...baseParams) as Item | undefined;
+
     if (!barcodeMatch) {
       barcodeMatch = database
         .prepare(`
           SELECT i.*
           FROM item_barcodes ib
           JOIN items i ON ib.item_id = i.item_id
-          WHERE ib.barcode IN (${placeholders})
+          WHERE TRIM(ib.barcode) IN (${placeholders}) AND ${whereSql}
           LIMIT 1
         `)
-        .get(...barcodeCandidates) as Item | undefined;
+        .get(...barcodeCandidates, ...baseParams) as Item | undefined;
     }
-    if (barcodeMatch) {
-      if (!filterInStockOnly || barcodeMatch.current_stock > 0) {
-        return [barcodeMatch];
+    if (barcodeMatch && !hasStructuredFilters) {
+      return [barcodeMatch];
+    }
+  }
+
+  const prioritized: Item[] = [];
+  const seenIds = new Set<number>();
+
+  // Method 6: Pharmacy Short Code exact match
+  if (trimmed.length <= 20) {
+    const shortMatches = database
+      .prepare(`
+        SELECT i.* FROM items i
+        WHERE UPPER(TRIM(COALESCE(i.short_code, ''))) = UPPER(?)
+          AND COALESCE(i.short_code, '') != ''
+          AND ${whereSql}
+        ORDER BY (CASE WHEN i.current_stock > 0 THEN 0 ELSE 1 END), i.item_name_en ASC
+        LIMIT 10
+      `)
+      .all(trimmed, ...baseParams) as Item[];
+    for (const sm of shortMatches) {
+      if (!seenIds.has(sm.item_id)) {
+        seenIds.add(sm.item_id);
+        prioritized.push(sm);
       }
     }
   }
 
-  // 2. Direct Item ID exact match check
+  // Direct Item ID match
   if (/^\d+$/.test(trimmed)) {
-    const idMatch = database.prepare('SELECT * FROM items WHERE item_id = ? LIMIT 1').get(parseInt(trimmed, 10)) as Item | undefined;
-    if (idMatch && (!filterInStockOnly || idMatch.current_stock > 0)) {
-      const rest = searchByFts(trimmed, filterInStockOnly, limit - 1, idMatch.item_id);
-      return [idMatch, ...rest];
+    const idMatch = database
+      .prepare(`SELECT i.* FROM items i WHERE i.item_id = ? AND ${whereSql} LIMIT 1`)
+      .get(parseInt(trimmed, 10), ...baseParams) as Item | undefined;
+    if (idMatch && !seenIds.has(idMatch.item_id)) {
+      seenIds.add(idMatch.item_id);
+      prioritized.push(idMatch);
     }
   }
 
-  // 3. FTS5 prefix search
-  return searchByFts(trimmed, filterInStockOnly, limit);
+  if (prioritized.length >= limit) {
+    return prioritized.slice(0, limit);
+  }
+
+  const rest = searchByFts(
+    trimmed,
+    whereSql,
+    baseParams,
+    limit - prioritized.length,
+    Array.from(seenIds)
+  );
+  return [...prioritized, ...rest];
 }
 
-function searchByFts(rawQuery: string, filterInStockOnly: boolean, limit: number, excludeId?: number): Item[] {
-  const database = getDatabaseInstance();
-  const clean = rawQuery.replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, ' ').trim();
-  if (!clean) {
-    return [];
-  }
-
-  const terms = clean.split(/\s+/).filter(Boolean);
-  const ftsQuery = terms.map(t => `"${t}"*`).join(' AND ');
-
-  try {
-    const ftsParams: (string | number)[] = [ftsQuery];
-    let ftsExcludeClause = '';
-    if (excludeId !== undefined) {
-      ftsExcludeClause = 'AND i.item_id != ?';
-      ftsParams.push(excludeId);
-    }
-    ftsParams.push(limit);
-
-    const sql = `
-      SELECT i.*
-      FROM items_fts f
-      JOIN items i ON f.item_id = i.item_id
-      WHERE items_fts MATCH ?
-      ${filterInStockOnly ? 'AND i.current_stock > 0' : ''}
-      ${ftsExcludeClause}
-      ORDER BY 
-        (CASE WHEN i.current_stock > 0 THEN 0 ELSE 1 END),
-        i.item_name_en ASC
-      LIMIT ?
-    `;
-    const ftsResults = database.prepare(sql).all(...ftsParams) as Item[];
-
-    if (ftsResults.length > 0) {
-      return ftsResults;
-    }
-  } catch {
-    // If FTS match has syntax quirk, fallback to LIKE
-  }
-
-  // Fallback to LIKE if FTS produced 0 results
-  const pattern = `%${rawQuery.trim()}%`;
-  const likeParams: (string | number)[] = [pattern, pattern, pattern, pattern];
-  let likeExcludeClause = '';
-  if (excludeId !== undefined) {
-    likeExcludeClause = 'AND item_id != ?';
-    likeParams.push(excludeId);
-  }
-  likeParams.push(limit);
-
-  const likeSql = `
-    SELECT * FROM items
-    WHERE (
-      item_name_en LIKE ? OR 
-      item_name_ar LIKE ? OR 
-      generic_name LIKE ? OR 
-      barcode LIKE ?
-    )
-    ${filterInStockOnly ? 'AND current_stock > 0' : ''}
-    ${likeExcludeClause}
-    ORDER BY (CASE WHEN current_stock > 0 THEN 0 ELSE 1 END), item_name_en ASC
-    LIMIT ?
-  `;
-  return database.prepare(likeSql).all(...likeParams) as Item[];
+export function searchItems(query: string, filterInStockOnly: boolean = false, limit: number = 50): Item[] {
+  return advancedSearchItems({
+    query,
+    scope: filterInStockOnly ? 'IN_STOCK' : 'ALL',
+    limit
+  });
 }
 
 /**
@@ -1111,7 +1330,7 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
     `);
 
     const updateStockStmt = database.prepare(`
-      UPDATE items SET current_stock = ROUND(current_stock - ?, 4) WHERE item_id = ?
+      UPDATE items SET current_stock = ROUND(current_stock - ?, 4), last_sold_at = ? WHERE item_id = ?
     `);
 
     const checkShortageStmt = database.prepare(`
@@ -1150,7 +1369,7 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
         deductQty = Math.round((item.quantity / pkgUnits) * 10000) / 10000;
       }
 
-      updateStockStmt.run(deductQty, item.item_id);
+      updateStockStmt.run(deductQty, invoiceDate, item.item_id);
 
       // Check stock after sale -> auto shortage draft
       const currentStockRow = database.prepare('SELECT current_stock, item_name_en FROM items WHERE item_id = ?').get(item.item_id) as { current_stock: number; item_name_en: string } | undefined;
@@ -1812,6 +2031,10 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         );
       }
 
+      const nextEnName = itemData.item_name_en ?? existing.item_name_en;
+      const nextArName = itemData.item_name_ar ?? existing.item_name_ar;
+      const nextPhonetic = [computePhoneticKey(nextEnName || ''), computePhoneticKey(nextArName || '')].filter(Boolean).join(' ').trim();
+
       database.prepare(`
         UPDATE items SET
           barcode = COALESCE(?, barcode),
@@ -1830,7 +2053,9 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
           pharmacy_discount_percent = COALESCE(?, pharmacy_discount_percent),
           tax_schedule_category = COALESCE(?, tax_schedule_category),
           temp_price = COALESCE(?, temp_price),
-          temp_price_active = COALESCE(?, temp_price_active)
+          temp_price_active = COALESCE(?, temp_price_active),
+          short_code = COALESCE(?, short_code),
+          phonetic_key = ?
         WHERE item_id = ?
       `).run(
         itemData.barcode,
@@ -1850,6 +2075,8 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         itemData.tax_schedule_category,
         itemData.temp_price ?? existing.temp_price ?? 0,
         itemData.temp_price_active ?? existing.temp_price_active ?? 0,
+        itemData.short_code ?? existing.short_code ?? '',
+        nextPhonetic || String(itemData.item_id),
         itemData.item_id
       );
 
@@ -1874,13 +2101,18 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         ? itemData.barcode.trim()
         : `LOC${String(newItemId).padStart(7, '0')}`;
 
+      const newPhonetic = [
+        computePhoneticKey(itemData.item_name_en.trim()),
+        computePhoneticKey(itemData.item_name_ar?.trim() || '')
+      ].filter(Boolean).join(' ').trim();
+
       database.prepare(`
         INSERT INTO items (
           item_id, barcode, item_name_en, item_name_ar, producer, generic_name, category,
           consumer_price, previous_price, package_units, discount_pct, buy_price,
           current_stock, expiry_date, pharmacy_discount_percent, tax_schedule_category,
-          temp_price, temp_price_active
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          temp_price, temp_price_active, short_code, phonetic_key
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         newItemId,
         barcode,
@@ -1899,7 +2131,9 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         itemData.pharmacy_discount_percent || 0,
         itemData.tax_schedule_category || 0,
         itemData.temp_price || 0,
-        itemData.temp_price_active || 0
+        itemData.temp_price_active || 0,
+        itemData.short_code?.trim() || '',
+        newPhonetic || String(newItemId)
       );
 
       // Insert into FTS5
@@ -2063,7 +2297,8 @@ export function createPurchaseInvoice(payload: CreatePurchaseInvoicePayload): Cr
       SET 
         current_stock = ROUND(current_stock + ?, 4),
         buy_price = ?,
-        expiry_date = CASE WHEN ? != '' THEN ? ELSE expiry_date END
+        expiry_date = CASE WHEN ? != '' THEN ? ELSE expiry_date END,
+        last_bought_at = ?
       WHERE item_id = ?
     `);
 
@@ -2099,6 +2334,7 @@ export function createPurchaseInvoice(payload: CreatePurchaseInvoicePayload): Cr
         effectiveBuyPrice,
         item.expiry_date || '',
         item.expiry_date || '',
+        invoiceDate,
         item.item_id
       );
 
@@ -4692,7 +4928,7 @@ export function updateSavedSaleInvoice(payload: UpdateSaleInvoicePayload): Creat
         id, invoice_number, line_number, item_id, item_name, quantity, unit_price, discount_pct, line_total, invoice_date, invoice_time, unit_type, cost_price, applied_price_source
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    const deductStockStmt = database.prepare('UPDATE items SET current_stock = ROUND(current_stock - ?, 4) WHERE item_id = ?');
+    const deductStockStmt = database.prepare('UPDATE items SET current_stock = ROUND(current_stock - ?, 4), last_sold_at = ? WHERE item_id = ?');
     const checkShortageStmt = database.prepare('SELECT count(*) as count FROM shortages_drafts WHERE item_id = ?');
     const insertShortageStmt = database.prepare(`
       INSERT INTO shortages_drafts (id, supplier_id, supplier_name, item_id, item_name, quantity, order_code)
@@ -4724,7 +4960,7 @@ export function updateSavedSaleInvoice(payload: UpdateSaleInvoicePayload): Creat
         const pkg = item.package_units && item.package_units > 1 ? item.package_units : 1;
         deductQty = Math.round((item.quantity / pkg) * 10000) / 10000;
       }
-      deductStockStmt.run(deductQty, item.item_id);
+      deductStockStmt.run(deductQty, invoiceDate, item.item_id);
 
       const curStockRow = database.prepare('SELECT current_stock, item_name_en FROM items WHERE item_id = ?').get(item.item_id) as { current_stock: number; item_name_en: string } | undefined;
       if (curStockRow && curStockRow.current_stock <= 0) {

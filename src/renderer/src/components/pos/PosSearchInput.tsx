@@ -320,23 +320,32 @@ export const PosSearchInput: React.FC<PosSearchInputProps> = ({
           onFocus={() => {
             if (results.length > 0) setIsOpen(true);
           }}
-          placeholder="مسح الباركود أو كتابة اسم الصنف / المادة الفعالة... (F2 للتركيز السريع | Enter للإضافة)"
-          className="w-full pl-28 pr-12 py-3 rounded-xl bg-white border-2 border-slate-300 focus:border-blue-600 focus:ring-4 focus:ring-blue-100/70 text-sm font-semibold text-slate-900 shadow-2xs transition-all placeholder:text-slate-400 placeholder:font-normal"
+          placeholder="مسح الباركود أو اسم الصنف / .=نهاية / *نجوم / =صوتي... (F2 للتركيز | Ctrl+F للبحث المتقدم)"
+          className="w-full pl-56 pr-12 py-3 rounded-xl bg-white border-2 border-slate-300 focus:border-blue-600 focus:ring-4 focus:ring-blue-100/70 text-sm font-semibold text-slate-900 shadow-2xs transition-all placeholder:text-slate-400 placeholder:font-normal"
           autoComplete="off"
           spellCheck={false}
         />
 
-        {/* Shortcut badges right inside input */}
-        <div className="absolute left-3 flex items-center gap-1.5">
+        {/* Shortcut badges & Advanced Search trigger right inside input */}
+        <div className="absolute left-2.5 flex items-center gap-1.5">
           {loading ? (
             <span className="text-xs text-blue-600 font-medium animate-pulse">جاري البحث...</span>
           ) : (
             <>
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new CustomEvent('titan-open-advanced-finder'))}
+                className="px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white border border-blue-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                title="محرك البحث المتقدم بـ 9 طرق (Ctrl+F)"
+              >
+                <Search className="w-3 h-3" />
+                بحث متقدم (Ctrl+F)
+              </button>
               <kbd className="px-2 py-0.5 text-[10px] font-mono font-bold rounded-md bg-slate-100 border border-slate-200 text-slate-600">
                 F2
               </kbd>
-              <kbd className="px-2 py-0.5 text-[10px] font-mono font-bold rounded-md bg-slate-100 border border-slate-200 text-slate-600">
-                Alt+A بدائل
+              <kbd className="hidden sm:inline-block px-2 py-0.5 text-[10px] font-mono font-bold rounded-md bg-slate-100 border border-slate-200 text-slate-600">
+                Alt+A
               </kbd>
             </>
           )}

@@ -58,7 +58,8 @@ import {
   getItemBarcodes,
   addItemBarcode,
   removeItemBarcode,
-  ensureItemHasBarcode
+  ensureItemHasBarcode,
+  advancedSearchItems
 } from './db';
 import { 
   performBackup, 
@@ -413,6 +414,11 @@ function registerIpcHandlers() {
 
   ipcMain.handle('inv:ensureItemBarcode', async (_event, itemId: number) => {
     return ensureItemHasBarcode(itemId);
+  });
+
+  // Module 6: 9-Method Advanced Drug Finder Handler
+  ipcMain.handle('db:advancedSearchItems', async (_event, filter: Record<string, unknown>) => {
+    return advancedSearchItems(filter);
   });
 }
 
