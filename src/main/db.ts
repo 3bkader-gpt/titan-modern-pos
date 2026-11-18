@@ -66,7 +66,15 @@ import {
   DuplicateCandidatePair,
   StockAndLedgerAuditReport,
   AuditLogs,
-  LedgerIntegrityStatus
+  LedgerIntegrityStatus,
+  ChronicPatient,
+  ChronicPatientItem,
+  SaveChronicPatientPayload,
+  InsuranceProvider,
+  InsuranceClaimRecord,
+  DrugInteractionAlert,
+  CartInteractionCheckResult,
+  SubstitutesAndAlternativesResult
 } from '../shared/types';
 import { calculateInvoicePricing } from '../shared/pricing';
 import { computePhoneticKey, toWildcardSqlPattern } from '../shared/phonetic';
@@ -443,7 +451,95 @@ function ensureSchemaUpgrades(database: Database.Database) {
         merged_by TEXT NOT NULL,
         merged_at TEXT NOT NULL
       );
+
+      -- M10: Chronic Patients, Insurance Providers & Claims, Drug Interactions
+      CREATE TABLE IF NOT EXISTS chronic_patients (
+        patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        patient_name TEXT NOT NULL,
+        phone TEXT DEFAULT '',
+        conditions TEXT DEFAULT '',
+        refill_interval_days INTEGER DEFAULT 30,
+        last_refill_date TEXT DEFAULT '',
+        next_due_date TEXT DEFAULT '',
+        notes TEXT DEFAULT ''
+      );
+
+      CREATE TABLE IF NOT EXISTS chronic_patient_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        patient_id INTEGER NOT NULL,
+        item_id INTEGER NOT NULL,
+        dosage_notes TEXT DEFAULT '',
+        quantity REAL NOT NULL DEFAULT 1,
+        FOREIGN KEY(patient_id) REFERENCES chronic_patients(patient_id) ON DELETE CASCADE,
+        FOREIGN KEY(item_id) REFERENCES items(item_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_chronic_items_patient ON chronic_patient_items(patient_id);
+
+      CREATE TABLE IF NOT EXISTS insurance_providers (
+        provider_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider_name TEXT NOT NULL,
+        default_copay_pct REAL DEFAULT 20,
+        credit_balance REAL DEFAULT 0,
+        contact_phone TEXT DEFAULT '',
+        is_active INTEGER DEFAULT 1
+      );
+
+      CREATE TABLE IF NOT EXISTS insurance_claims (
+        claim_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider_id INTEGER NOT NULL,
+        invoice_id INTEGER NOT NULL,
+        patient_card_number TEXT DEFAULT '',
+        patient_name TEXT DEFAULT '',
+        total_invoice REAL NOT NULL,
+        patient_copay_amount REAL NOT NULL,
+        company_claim_amount REAL NOT NULL,
+        status TEXT DEFAULT 'PENDING',
+        claim_date TEXT NOT NULL,
+        paid_date TEXT DEFAULT '',
+        FOREIGN KEY(provider_id) REFERENCES insurance_providers(provider_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_insurance_claims_provider ON insurance_claims(provider_id);
+
+      CREATE TABLE IF NOT EXISTS drug_interactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        generic_a TEXT NOT NULL,
+        generic_b TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        clinical_note TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_drug_interactions_ab ON drug_interactions(generic_a, generic_b);
     `);
+
+    // Seed default insurance providers if empty
+    const countIns = database.prepare('SELECT count(*) as c FROM insurance_providers').get() as { c: number };
+    if (countIns.c === 0) {
+      const insertIns = database.prepare('INSERT INTO insurance_providers (provider_name, default_copay_pct, contact_phone, is_active) VALUES (?, ?, ?, 1)');
+      insertIns.run('ميدنت (MedNet)', 20, '16444');
+      insertIns.run('أكسا للتأمين الطبي (AXA)', 15, '19792');
+      insertIns.run('نقابة المهندسين', 10, '0227948333');
+      insertIns.run('نقابة الأطباء', 10, '0227943166');
+    }
+
+    // Seed default drug interactions if empty
+    const countDdi = database.prepare('SELECT count(*) as c FROM drug_interactions').get() as { c: number };
+    if (countDdi.c === 0) {
+      const insertDdi = database.prepare('INSERT INTO drug_interactions (generic_a, generic_b, severity, clinical_note) VALUES (?, ?, ?, ?)');
+      insertDdi.run('warfarin', 'aspirin', 'HIGH', 'خطر نزيف حاد نتيجة التثبيط المزدوج لعوامل التخثر وتثبيط الصفائح الدموية');
+      insertDdi.run('aspirin', 'warfarin', 'HIGH', 'خطر نزيف حاد نتيجة التثبيط المزدوج لعوامل التخثر وتثبيط الصفائح الدموية');
+      insertDdi.run('sildenafil', 'nitroglycerin', 'HIGH', 'انخفاض حاد وقاتل في ضغط الدم نتيجة فرط توسع الأوعية بتآزر أكسيد النيتريك');
+      insertDdi.run('nitroglycerin', 'sildenafil', 'HIGH', 'انخفاض حاد وقاتل في ضغط الدم نتيجة فرط توسع الأوعية بتآزر أكسيد النيتريك');
+      insertDdi.run('clarithromycin', 'atorvastatin', 'HIGH', 'خطر انحلال الربيدات (Rhabdomyolysis) وتسمم عضلي حاد نتيجة تثبيط إنزيم CYP3A4');
+      insertDdi.run('atorvastatin', 'clarithromycin', 'HIGH', 'خطر انحلال الربيدات (Rhabdomyolysis) وتسمم عضلي حاد نتيجة تثبيط إنزيم CYP3A4');
+      insertDdi.run('ciprofloxacin', 'theophylline', 'MODERATE', 'ارتفاع تركيز الثيوفيلين وخطر حدوث تشنجات عصبية لتثبيط CYP1A2');
+      insertDdi.run('theophylline', 'ciprofloxacin', 'MODERATE', 'ارتفاع تركيز الثيوفيلين وخطر حدوث تشنجات عصبية لتثبيط CYP1A2');
+      insertDdi.run('ibuprofen', 'enalapril', 'MODERATE', 'انخفاض الفعالية الخافضة لضغط الدم وزيادة العبء الكلوي وتثبيط البروستاجلاندين');
+      insertDdi.run('enalapril', 'ibuprofen', 'MODERATE', 'انخفاض الفعالية الخافضة لضغط الدم وزيادة العبء الكلوي وتثبيط البروستاجلاندين');
+      insertDdi.run('omeprazole', 'clopidogrel', 'MODERATE', 'انخفاض الفعالية المضادة لتكتل الصفائح نتيجة تنافس تثبيط إنزيم CYP2C19');
+      insertDdi.run('clopidogrel', 'omeprazole', 'MODERATE', 'انخفاض الفعالية المضادة لتكتل الصفائح نتيجة تنافس تثبيط إنزيم CYP2C19');
+    }
 
     // Ensure Dr. Mariam Elhomeily account exists in users table
     const existingDoctor = database.prepare("SELECT * FROM users WHERE user_name LIKE '%مريم%' OR user_name LIKE '%الحميلي%'").get();
@@ -1444,57 +1540,109 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
       }
     }
 
-    // 5. Update Treasury State
+    // 5. Insurance Copay & Claims Calculation
+    let patientCopayAmount = netTotal;
+    let companyClaimAmount = 0;
+    let insuranceProviderName = '';
+
+    if (payload.insurance_provider_id && payload.insurance_provider_id > 0) {
+      const provider = database
+        .prepare('SELECT provider_id, provider_name, default_copay_pct FROM insurance_providers WHERE provider_id = ?')
+        .get(payload.insurance_provider_id) as { provider_id: number; provider_name: string; default_copay_pct: number } | undefined;
+      if (provider) {
+        insuranceProviderName = provider.provider_name;
+        const copayPct = (typeof payload.insurance_copay_pct === 'number' && payload.insurance_copay_pct >= 0)
+          ? payload.insurance_copay_pct
+          : (provider.default_copay_pct ?? 20);
+        patientCopayAmount = Math.round((netTotal * (copayPct / 100)) * 100) / 100;
+        companyClaimAmount = Math.round((netTotal - patientCopayAmount) * 100) / 100;
+
+        database.prepare(`
+          UPDATE insurance_providers
+          SET credit_balance = ROUND(credit_balance + ?, 2)
+          WHERE provider_id = ?
+        `).run(companyClaimAmount, provider.provider_id);
+
+        database.prepare(`
+          INSERT INTO insurance_claims (
+            provider_id, invoice_id, patient_card_number, patient_name,
+            total_invoice, patient_copay_amount, company_claim_amount,
+            status, claim_date
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+        `).run(
+          provider.provider_id,
+          invoiceNumber,
+          payload.patient_card_number || '',
+          payload.client_name || '',
+          netTotal,
+          patientCopayAmount,
+          companyClaimAmount,
+          fullTimestamp
+        );
+      }
+    }
+
+    // 6. Chronic Patient Refill Interval Update
+    if (payload.chronic_patient_id && payload.chronic_patient_id > 0) {
+      database.prepare(`
+        UPDATE chronic_patients
+        SET last_refill_date = ?,
+            next_due_date = date(?, '+' || COALESCE(NULLIF(refill_interval_days, 0), 30) || ' days')
+        WHERE patient_id = ?
+      `).run(invoiceDate, invoiceDate, payload.chronic_patient_id);
+    }
+
+    // 7. Update Treasury State
     if (payload.payment_method === 'نقدي' || payload.payment_method === 'دليفري') {
       database.prepare(`
         UPDATE treasury_state
         SET cash_balance = ROUND(cash_balance + ?, 2), last_updated = ?
         WHERE id = 1
-      `).run(netTotal, fullTimestamp);
+      `).run(patientCopayAmount, fullTimestamp);
     }
 
-    // 6. Balanced Double-Entry Accounting Ledger in general_ledger_2026
+    // 8. Balanced Double-Entry Accounting Ledger in general_ledger_2026
     try {
-      const maxEntryRow = database.prepare('SELECT COALESCE(MAX(entry_id), 0) as maxId FROM general_ledger_2026').get() as { maxId: number };
-      const newEntryId = maxEntryRow.maxId + 1;
-
-      const debitAccount = (payload.payment_method === 'نقدي' || payload.payment_method === 'دليفري')
-        ? 'اصول.متداولة.نقدية.كاش'
-        : (payload.payment_method === 'آجل' ? 'اصول.متداولة.عملاء' : 'اصول.متداولة.بنك.فيزا');
-
-      // 1. Debit Cash / Receivable / Card
-      database.prepare(`
-        INSERT OR IGNORE INTO general_ledger_2026 (
-          entry_id, entry_date, account_name, document_ref, notes, amount, debit, credit
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-      `).run(
-        newEntryId,
-        invoiceDate,
-        debitAccount,
-        `INV-${invoiceNumber}`,
-        `مبيعات ${payload.payment_method} فاتورة #${invoiceNumber}`,
-        netTotal,
-        netTotal
-      );
-
-      // 2. Credit Sales Revenue (إيرادات مبيعات)
-      database.prepare(`
-        INSERT OR IGNORE INTO general_ledger_2026 (
-          entry_id, entry_date, account_name, document_ref, notes, amount, debit, credit
-        ) VALUES (?, ?, 'ايرادات.مبيعات', ?, ?, ?, 0, ?)
-      `).run(
-        newEntryId + 1,
-        invoiceDate,
-        `INV-${invoiceNumber}`,
-        `إيراد مبيعات فاتورة #${invoiceNumber}`,
-        -netTotal,
-        netTotal
-      );
-    } catch (glErr: unknown) {
-      const msg = glErr instanceof Error ? glErr.message : String(glErr);
-      if (!msg.includes('UNIQUE constraint failed')) {
-        console.error('Error posting sales invoice to general_ledger_2026:', glErr);
+      const debitAccount = getSalePaymentGlAccount(payload.payment_method);
+      if (companyClaimAmount > 0) {
+        postBalancedGlLines(database, invoiceDate, `INV-${invoiceNumber}`, [
+          {
+            account_name: debitAccount,
+            notes: `تحمل مريض تأمين (${insuranceProviderName}) فاتورة #${invoiceNumber}`,
+            debit: patientCopayAmount,
+            credit: 0
+          },
+          {
+            account_name: 'اصول.متداولة.ذمم شركات تامين',
+            notes: `مطالبة شركة تأمين (${insuranceProviderName}) فاتورة #${invoiceNumber}`,
+            debit: companyClaimAmount,
+            credit: 0
+          },
+          {
+            account_name: 'ايرادات.مبيعات',
+            notes: `إيراد مبيعات تأمين فاتورة #${invoiceNumber}`,
+            debit: 0,
+            credit: netTotal
+          }
+        ]);
+      } else {
+        postBalancedGlLines(database, invoiceDate, `INV-${invoiceNumber}`, [
+          {
+            account_name: debitAccount,
+            notes: `مبيعات ${payload.payment_method} فاتورة #${invoiceNumber}`,
+            debit: netTotal,
+            credit: 0
+          },
+          {
+            account_name: 'ايرادات.مبيعات',
+            notes: `إيراد مبيعات فاتورة #${invoiceNumber}`,
+            debit: 0,
+            credit: netTotal
+          }
+        ]);
       }
+    } catch (glErr: unknown) {
+      console.error('Error posting sales invoice to general_ledger_2026:', glErr);
     }
 
     // 7. Delivery Orders logging
@@ -1560,7 +1708,10 @@ export function createSaleInvoice(payload: CreateSaleInvoicePayload): CreateSale
       items: payload.items,
       client_name: payload.client_name,
       client_phone: payload.client_phone,
-      client_address: payload.client_address
+      client_address: payload.client_address,
+      patient_copay_amount: patientCopayAmount,
+      company_claim_amount: companyClaimAmount,
+      insurance_provider_name: insuranceProviderName
     };
   });
 
@@ -6206,6 +6357,398 @@ export function runStockAndLedgerIntegrityAudit(): StockAndLedgerAuditReport {
     negative_stock_items: negativeRows,
     below_cost_items: belowCostRows,
     gl_integrity: checkLedgerIntegrity()
+  };
+}
+
+// =========================================================================
+// MODULE 10: Chronic Patients, Insurance Claims, Generics vs Alternatives & DDI
+// =========================================================================
+
+export function getChronicPatients(query: string = ''): ChronicPatient[] {
+  const database = getDatabaseInstance();
+  const clean = query.trim();
+  let rows: any[] = [];
+  if (clean) {
+    rows = database.prepare(`
+      SELECT * FROM chronic_patients 
+      WHERE patient_name LIKE ? OR phone LIKE ? OR conditions LIKE ?
+      ORDER BY patient_name ASC
+    `).all(`%${clean}%`, `%${clean}%`, `%${clean}%`);
+  } else {
+    rows = database.prepare('SELECT * FROM chronic_patients ORDER BY patient_name ASC').all();
+  }
+
+  const getItemsStmt = database.prepare(`
+    SELECT cpi.*, i.item_name_en, i.item_name_ar, i.consumer_price, i.current_stock
+    FROM chronic_patient_items cpi
+    JOIN items i ON cpi.item_id = i.item_id
+    WHERE cpi.patient_id = ?
+  `);
+
+  return rows.map((p: any) => ({
+    patient_id: p.patient_id,
+    patient_name: p.patient_name,
+    phone: p.phone || '',
+    conditions: p.conditions || '',
+    refill_interval_days: p.refill_interval_days || 30,
+    last_refill_date: p.last_refill_date || '',
+    next_due_date: p.next_due_date || '',
+    notes: p.notes || '',
+    items: getItemsStmt.all(p.patient_id) as ChronicPatientItem[]
+  }));
+}
+
+export function saveChronicPatient(payload: SaveChronicPatientPayload): ChronicPatient {
+  const database = getDatabaseInstance();
+  const name = (payload.patient_name || '').trim();
+  if (!name) {
+    throw new Error('يجب إدخال اسم المريض المزمن.');
+  }
+
+  const tx = database.transaction(() => {
+    let patientId = payload.patient_id;
+    const interval = Math.max(1, Number(payload.refill_interval_days || 30));
+
+    if (patientId && patientId > 0) {
+      database.prepare(`
+        UPDATE chronic_patients
+        SET patient_name = ?, phone = ?, conditions = ?, refill_interval_days = ?,
+            last_refill_date = COALESCE(?, last_refill_date),
+            next_due_date = COALESCE(?, next_due_date),
+            notes = ?
+        WHERE patient_id = ?
+      `).run(
+        name,
+        payload.phone || '',
+        payload.conditions || '',
+        interval,
+        payload.last_refill_date || null,
+        payload.next_due_date || null,
+        payload.notes || '',
+        patientId
+      );
+    } else {
+      const nextDue = payload.next_due_date || '';
+      const info = database.prepare(`
+        INSERT INTO chronic_patients (
+          patient_name, phone, conditions, refill_interval_days,
+          last_refill_date, next_due_date, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        name,
+        payload.phone || '',
+        payload.conditions || '',
+        interval,
+        payload.last_refill_date || '',
+        nextDue,
+        payload.notes || ''
+      );
+      patientId = Number(info.lastInsertRowid);
+    }
+
+    if (payload.items) {
+      database.prepare('DELETE FROM chronic_patient_items WHERE patient_id = ?').run(patientId);
+      const insertItemStmt = database.prepare(`
+        INSERT INTO chronic_patient_items (patient_id, item_id, dosage_notes, quantity)
+        VALUES (?, ?, ?, ?)
+      `);
+      for (const item of payload.items) {
+        if (item.item_id && item.item_id > 0) {
+          insertItemStmt.run(
+            patientId,
+            item.item_id,
+            item.dosage_notes || '',
+            Math.max(1, Number(item.quantity || 1))
+          );
+        }
+      }
+    }
+
+    return patientId;
+  });
+
+  const finalId = tx();
+  const list = getChronicPatients();
+  const found = list.find((p) => p.patient_id === finalId);
+  if (!found) {
+    throw new Error('فشل استرجاع بيانات المريض بعد الحفظ.');
+  }
+  return found;
+}
+
+export function deleteChronicPatient(patientId: number): boolean {
+  const database = getDatabaseInstance();
+  const tx = database.transaction(() => {
+    database.prepare('DELETE FROM chronic_patient_items WHERE patient_id = ?').run(patientId);
+    const info = database.prepare('DELETE FROM chronic_patients WHERE patient_id = ?').run(patientId);
+    return info.changes > 0;
+  });
+  return tx();
+}
+
+export function getInsuranceProviders(): InsuranceProvider[] {
+  const database = getDatabaseInstance();
+  return database.prepare(`
+    SELECT provider_id, provider_name, default_copay_pct, credit_balance, contact_phone, is_active
+    FROM insurance_providers
+    ORDER BY is_active DESC, provider_name ASC
+  `).all() as InsuranceProvider[];
+}
+
+export function saveInsuranceProvider(provider: Partial<InsuranceProvider>): InsuranceProvider {
+  const database = getDatabaseInstance();
+  const name = (provider.provider_name || '').trim();
+  if (!name) {
+    throw new Error('يجب إدخال اسم شركة التأمين.');
+  }
+  const copay = Math.max(0, Math.min(100, Number(provider.default_copay_pct ?? 20)));
+  const phone = (provider.contact_phone || '').trim();
+  const active = provider.is_active !== undefined ? (provider.is_active ? 1 : 0) : 1;
+
+  if (provider.provider_id && provider.provider_id > 0) {
+    database.prepare(`
+      UPDATE insurance_providers
+      SET provider_name = ?, default_copay_pct = ?, contact_phone = ?, is_active = ?
+      WHERE provider_id = ?
+    `).run(name, copay, phone, active, provider.provider_id);
+    return database.prepare('SELECT * FROM insurance_providers WHERE provider_id = ?').get(provider.provider_id) as InsuranceProvider;
+  } else {
+    const info = database.prepare(`
+      INSERT INTO insurance_providers (provider_name, default_copay_pct, credit_balance, contact_phone, is_active)
+      VALUES (?, ?, 0, ?, ?)
+    `).run(name, copay, phone, active);
+    return database.prepare('SELECT * FROM insurance_providers WHERE provider_id = ?').get(info.lastInsertRowid) as InsuranceProvider;
+  }
+}
+
+export function getInsuranceClaims(providerId?: number, status?: string): InsuranceClaimRecord[] {
+  const database = getDatabaseInstance();
+  let sql = `
+    SELECT c.*, p.provider_name
+    FROM insurance_claims c
+    JOIN insurance_providers p ON c.provider_id = p.provider_id
+    WHERE 1=1
+  `;
+  const params: any[] = [];
+  if (providerId && providerId > 0) {
+    sql += ' AND c.provider_id = ?';
+    params.push(providerId);
+  }
+  if (status && status !== 'ALL') {
+    sql += ' AND c.status = ?';
+    params.push(status);
+  }
+  sql += ' ORDER BY c.claim_id DESC LIMIT 300';
+  return database.prepare(sql).all(...params) as InsuranceClaimRecord[];
+}
+
+export function recordInsuranceSettlement(providerId: number, paidAmount: number, notes: string = ''): {
+  success: boolean;
+  newBalance: number;
+  settledAmount: number;
+} {
+  const database = getDatabaseInstance();
+  const amount = Math.round(Number(paidAmount || 0) * 100) / 100;
+  if (amount <= 0) {
+    throw new Error('مبلغ السداد يجب أن يكون أكبر من الصفر.');
+  }
+
+  const provider = database.prepare('SELECT * FROM insurance_providers WHERE provider_id = ?').get(providerId) as InsuranceProvider | undefined;
+  if (!provider) {
+    throw new Error(`شركة التأمين رقم #${providerId} غير موجودة.`);
+  }
+
+  const tx = database.transaction(() => {
+    const local = getLocalDateTime();
+    const cleanNotes = notes.trim() || `سداد مطالبة تأمين - ${provider.provider_name}`;
+
+    postBalancedGlLines(database, local.date, `INS-SETTLE-${providerId}-${Date.now().toString().slice(-6)}`, [
+      {
+        account_name: 'اصول.متداولة.نقدية.كاش',
+        notes: cleanNotes,
+        debit: amount,
+        credit: 0
+      },
+      {
+        account_name: 'اصول.متداولة.ذمم شركات تامين',
+        notes: `تخفيض ذمة ${provider.provider_name}`,
+        debit: 0,
+        credit: amount
+      }
+    ]);
+
+    database.prepare(`
+      UPDATE treasury_state
+      SET cash_balance = ROUND(cash_balance + ?, 2), last_updated = ?
+      WHERE id = 1
+    `).run(amount, local.timestamp);
+
+    database.prepare(`
+      UPDATE insurance_providers
+      SET credit_balance = ROUND(MAX(0, credit_balance - ?), 2)
+      WHERE provider_id = ?
+    `).run(amount, providerId);
+
+    let remainingToSettle = amount;
+    const pendingClaims = database.prepare(`
+      SELECT claim_id, company_claim_amount FROM insurance_claims
+      WHERE provider_id = ? AND status = 'PENDING'
+      ORDER BY claim_id ASC
+    `).all(providerId) as Array<{ claim_id: number; company_claim_amount: number }>;
+
+    for (const c of pendingClaims) {
+      if (remainingToSettle >= c.company_claim_amount) {
+        database.prepare("UPDATE insurance_claims SET status = 'PAID', paid_date = ? WHERE claim_id = ?").run(local.date, c.claim_id);
+        remainingToSettle = Math.round((remainingToSettle - c.company_claim_amount) * 100) / 100;
+      } else {
+        break;
+      }
+    }
+
+    const updated = database.prepare('SELECT credit_balance FROM insurance_providers WHERE provider_id = ?').get(providerId) as { credit_balance: number };
+    return {
+      success: true,
+      newBalance: updated.credit_balance,
+      settledAmount: amount
+    };
+  });
+
+  return tx();
+}
+
+export function checkCartInteractions(items: Array<{ item_id: number; generic_name?: string; item_name_en?: string; item_name_ar?: string }>): CartInteractionCheckResult {
+  const database = getDatabaseInstance();
+  const alerts: DrugInteractionAlert[] = [];
+
+  if (!items || items.length < 2) {
+    return { hasAlerts: false, alerts: [] };
+  }
+
+  const populated = items.map((it) => {
+    let g = (it.generic_name || '').trim().toLowerCase();
+    let nameEn = it.item_name_en || '';
+    let nameAr = it.item_name_ar || '';
+    if (!g || !nameEn) {
+      const dbItem = database.prepare('SELECT generic_name, item_name_en, item_name_ar FROM items WHERE item_id = ?').get(it.item_id) as any;
+      if (dbItem) {
+        if (!g) g = (dbItem.generic_name || '').trim().toLowerCase();
+        if (!nameEn) nameEn = dbItem.item_name_en || '';
+        if (!nameAr) nameAr = dbItem.item_name_ar || '';
+      }
+    }
+    return {
+      item_id: it.item_id,
+      displayName: nameAr ? `${nameAr} (${nameEn})` : nameEn || `صنف #${it.item_id}`,
+      generic: g
+    };
+  });
+
+  // 1. Check duplicate generic among distinct item IDs
+  const genericMap = new Map<string, typeof populated>();
+  for (const item of populated) {
+    if (!item.generic || item.generic === 'undefined' || item.generic === 'null') continue;
+    const existing = genericMap.get(item.generic) || [];
+    if (!existing.some((e) => e.item_id === item.item_id)) {
+      existing.push(item);
+      genericMap.set(item.generic, existing);
+    }
+  }
+
+  for (const [gen, matched] of genericMap.entries()) {
+    if (matched.length > 1) {
+      alerts.push({
+        type: 'DUPLICATE_GENERIC',
+        severity: 'HIGH',
+        itemA: matched[0].displayName,
+        itemB: matched[1].displayName,
+        genericA: gen,
+        genericB: gen,
+        clinical_note: `تنبيه سريري: كلا الصنفين يحتويان على نفس المادة الفعالة (${gen}). خطر تضاعف الجرعة العلاجية والتسمم الدوائي.`
+      });
+    }
+  }
+
+  // 2. Check DDI pairs from drug_interactions table
+  const allInteractions = database.prepare('SELECT generic_a, generic_b, severity, clinical_note FROM drug_interactions').all() as Array<{
+    generic_a: string;
+    generic_b: string;
+    severity: 'HIGH' | 'MODERATE';
+    clinical_note: string;
+  }>;
+
+  for (let i = 0; i < populated.length; i++) {
+    for (let j = i + 1; j < populated.length; j++) {
+      const a = populated[i];
+      const b = populated[j];
+      if (!a.generic || !b.generic || a.generic === b.generic) continue;
+
+      const matchedDdi = allInteractions.find(
+        (rule) =>
+          (rule.generic_a.toLowerCase() === a.generic && rule.generic_b.toLowerCase() === b.generic) ||
+          (rule.generic_a.toLowerCase() === b.generic && rule.generic_b.toLowerCase() === a.generic)
+      );
+
+      if (matchedDdi) {
+        alerts.push({
+          type: 'DDI',
+          severity: matchedDdi.severity,
+          itemA: a.displayName,
+          itemB: b.displayName,
+          genericA: a.generic,
+          genericB: b.generic,
+          clinical_note: matchedDdi.clinical_note
+        });
+      }
+    }
+  }
+
+  return {
+    hasAlerts: alerts.length > 0,
+    alerts
+  };
+}
+
+export function getSubstitutesAndAlternatives(itemId: number): SubstitutesAndAlternativesResult {
+  const database = getDatabaseInstance();
+  const source = database.prepare('SELECT item_id, generic_name, category, consumer_price FROM items WHERE item_id = ?').get(itemId) as Item | undefined;
+
+  if (!source) {
+    return {
+      sameGeneric: [],
+      sameCategory: [],
+      sourceGeneric: '',
+      sourceCategory: ''
+    };
+  }
+
+  const gen = (source.generic_name || '').trim();
+  const cat = (source.category || '').trim();
+
+  let sameGeneric: Item[] = [];
+  if (gen) {
+    sameGeneric = database.prepare(`
+      SELECT * FROM items
+      WHERE generic_name = ? AND item_id != ?
+      ORDER BY (CASE WHEN current_stock > 0 THEN 0 ELSE 1 END), consumer_price ASC
+      LIMIT 100
+    `).all(gen, itemId) as Item[];
+  }
+
+  let sameCategory: Item[] = [];
+  if (cat) {
+    sameCategory = database.prepare(`
+      SELECT * FROM items
+      WHERE category = ? AND item_id != ? AND (generic_name != ? OR generic_name IS NULL OR generic_name = '')
+      ORDER BY (CASE WHEN current_stock > 0 THEN 0 ELSE 1 END), consumer_price ASC
+      LIMIT 100
+    `).all(cat, itemId, gen) as Item[];
+  }
+
+  return {
+    sameGeneric,
+    sameCategory,
+    sourceGeneric: gen,
+    sourceCategory: cat
   };
 }
 

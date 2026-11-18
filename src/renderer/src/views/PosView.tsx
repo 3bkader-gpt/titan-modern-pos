@@ -8,7 +8,10 @@ import {
   AuthSession,
   EditableSaleInvoiceData,
   UpdateSaleInvoicePayload,
-  DiscountMode
+  DiscountMode,
+  InsuranceProvider,
+  DrugInteractionAlert,
+  ChronicPatient
 } from '../../../shared/types';
 import { calculateInvoicePricing } from '../../../shared/pricing';
 import { PosSearchInput } from '../components/pos/PosSearchInput';
@@ -17,9 +20,10 @@ import { PosCheckoutPanel } from '../components/pos/PosCheckoutPanel';
 import { ThermalReceiptModal } from '../components/pos/ThermalReceiptModal';
 import { QuickReturnModal } from '../components/pos/QuickReturnModal';
 import { DrugEyeSubstituteModal } from '../components/pos/DrugEyeSubstituteModal';
+import { ChronicPatientsModal } from '../components/pos/ChronicPatientsModal';
 import { ManagerOverrideModal } from '../components/auth/ManagerOverrideModal';
 import { playBeepSuccess, playCheckoutChime, playWarningTone } from '../components/pos/soundEffects';
-import { Plus, X, ShoppingBag, Receipt, AlertCircle, CheckCircle2, Pencil } from 'lucide-react';
+import { Plus, X, ShoppingBag, Receipt, AlertCircle, CheckCircle2, Pencil, HeartPulse, Shield } from 'lucide-react';
 
 interface CartItem extends CreateSaleItemPayload {
   current_stock: number;
@@ -42,6 +46,10 @@ interface ActiveCartTab {
   clientAddress: string;
   editingInvoiceNumber?: number;
   editingOverridePin?: string;
+  insuranceProviderId?: number;
+  insuranceCopayPct?: number;
+  patientCardNumber?: string;
+  chronicPatientId?: number;
 }
 
 function getActivePackPrice(item: CartItem): number {
@@ -110,8 +118,31 @@ export const PosView: React.FC<PosViewProps> = ({
     }, 4000);
   };
 
+  const [showChronicModal, setShowChronicModal] = useState<boolean>(false);
+  const [insuranceProviders, setInsuranceProviders] = useState<InsuranceProvider[]>([]);
+  const [cartAlerts, setCartAlerts] = useState<DrugInteractionAlert[]>([]);
+
   // Current active cart reference
   const currentTab = tabs.find(t => t.id === activeTabId) || tabs[0];
+
+  useEffect(() => {
+    if (window.electronAPI) {
+      window.electronAPI.getInsuranceProviders().then(data => setInsuranceProviders(data || []));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (currentTab.items.length >= 2 && window.electronAPI) {
+      window.electronAPI.checkCartInteractions(currentTab.items).then(res => {
+        setCartAlerts(res?.alerts || []);
+      }).catch(err => {
+        console.error('Check interactions error:', err);
+        setCartAlerts([]);
+      });
+    } else {
+      setCartAlerts([]);
+    }
+  }, [currentTab.items]);
 
   useEffect(() => {
     if (!pendingEditInvoice) return;
@@ -640,7 +671,11 @@ export const PosView: React.FC<PosViewProps> = ({
         cashier_name: currentUser?.user_name,
         user_role: currentUser?.role,
         manager_override_pin: overrideAuth?.pinCode || currentTab.editingOverridePin,
-        override_manager_name: overrideAuth?.managerName
+        override_manager_name: overrideAuth?.managerName,
+        insurance_provider_id: currentTab.insuranceProviderId,
+        insurance_copay_pct: currentTab.insuranceCopayPct,
+        patient_card_number: currentTab.patientCardNumber,
+        chronic_patient_id: currentTab.chronicPatientId
       };
 
       if (window.electronAPI) {
@@ -706,7 +741,43 @@ export const PosView: React.FC<PosViewProps> = ({
     }
   };
 
-  // Keyboard Shortcuts Handler: F8 (New Tab), F9 (Save), F10 (Save & Print), F11 (Return), Alt+1..9 (Switch Tabs)
+  const handleLoadPrescriptionToCart = (
+    loadedItems: Array<{
+      item_id: number;
+      item_name: string;
+      unit_price: number;
+      quantity: number;
+    }>,
+    patient: ChronicPatient
+  ) => {
+    const newCartItems: CartItem[] = loadedItems.map((it) => ({
+      item_id: it.item_id,
+      item_name: it.item_name,
+      quantity: it.quantity,
+      unit_price: it.unit_price,
+      line_total: Math.round(it.unit_price * it.quantity * 100) / 100,
+      unit_type: 'pack',
+      package_units: 1,
+      discount_pct: 0,
+      current_stock: 99,
+      base_consumer_price: it.unit_price,
+      base_buy_price: 0,
+      cost_price: 0
+    }));
+
+    updateCurrentTab((tab) => ({
+      ...tab,
+      title: `روشتة ${patient.patient_name.slice(0, 10)}`,
+      items: newCartItems,
+      clientName: patient.patient_name,
+      clientPhone: patient.phone || tab.clientPhone,
+      chronicPatientId: patient.patient_id
+    }));
+
+    showNotification(`تم تحميل روشتة المريض ${patient.patient_name} بنجاح في الكاشير`, 'success');
+  };
+
+  // Keyboard Shortcuts Handler: F8 (Chronic Patients & Insurance), F9 (Save), F10 (Save & Print), F11 (Return), Alt+1..9 (Switch Tabs)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (['F8', 'F9', 'F10', 'F11'].includes(e.key)) {
@@ -714,7 +785,7 @@ export const PosView: React.FC<PosViewProps> = ({
       }
 
       if (e.key === 'F8') {
-        handleAddNewTab();
+        setShowChronicModal(true);
       } else if (e.key === 'F9') {
         executeSaveInvoice(false);
       } else if (e.key === 'F10') {
@@ -823,18 +894,31 @@ export const PosView: React.FC<PosViewProps> = ({
             <button
               type="button"
               onClick={handleAddNewTab}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-dashed border-blue-300 hover:border-blue-500 bg-blue-50/40 hover:bg-blue-50 text-blue-700 text-xs font-bold transition-all shadow-2xs whitespace-nowrap shrink-0 group"
-              title="فتح فاتورة معلقة جديدة (F8)"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-dashed border-blue-300 hover:border-blue-500 bg-blue-50/40 hover:bg-blue-50 text-blue-700 text-xs font-bold transition-all shadow-2xs whitespace-nowrap shrink-0 group cursor-pointer"
+              title="فتح فاتورة معلقة جديدة"
             >
               <div className="w-5 h-5 rounded-md bg-blue-100 flex items-center justify-center group-hover:bg-blue-200 transition-colors">
                 <Plus className="w-3.5 h-3.5 text-blue-700" />
               </div>
               <span className="whitespace-nowrap">فاتورة جديدة</span>
-              <kbd className="px-1.5 py-0.5 rounded-md bg-white border border-blue-200 text-[10px] font-mono font-bold text-blue-600 shadow-2xs">
-                F8
-              </kbd>
             </button>
           )}
+
+          {/* M10: Chronic Patients & Insurance Modal Trigger (F8) */}
+          <button
+            type="button"
+            onClick={() => setShowChronicModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-rose-300 hover:border-rose-500 bg-rose-50/60 hover:bg-rose-50 text-rose-700 text-xs font-bold transition-all shadow-2xs whitespace-nowrap shrink-0 group cursor-pointer"
+            title="ملفات المرضى المزمنين وتعاقدات التأمين الطبي (F8)"
+          >
+            <div className="w-5 h-5 rounded-md bg-rose-100 flex items-center justify-center group-hover:bg-rose-200 transition-colors">
+              <HeartPulse className="w-3.5 h-3.5 text-rose-600" />
+            </div>
+            <span className="whitespace-nowrap">المزمنين والتأمين</span>
+            <kbd className="px-1.5 py-0.5 rounded-md bg-white border border-rose-200 text-[10px] font-mono font-bold text-rose-600 shadow-2xs">
+              F8
+            </kbd>
+          </button>
         </div>
 
         {/* Quick shortcut helper tags */}
@@ -846,7 +930,7 @@ export const PosView: React.FC<PosViewProps> = ({
           <span>•</span>
           <span className="flex items-center gap-1">
             <kbd className="px-1.5 py-0.5 font-mono text-[10px] font-bold bg-slate-100 border border-slate-200 rounded text-slate-700">F8</kbd>
-            <span>فاتورة معلقة</span>
+            <span>مزمنين وتأمين</span>
           </span>
           <span>•</span>
           <span className="flex items-center gap-1">
@@ -931,26 +1015,58 @@ export const PosView: React.FC<PosViewProps> = ({
       <div className="flex-1 grid grid-cols-12 gap-3 min-h-0">
         
         {/* Left Column: Interactive Cart Items Table (col-span-8) */}
-        <div className="col-span-12 lg:col-span-8 h-full min-h-0">
-          <PosCartTable
-            items={currentTab.items}
-            onUpdateQuantity={handleUpdateQuantity}
-            onToggleUnit={handleToggleUnit}
-            onToggleTempPrice={handleToggleTempPrice}
-            onUpdateDiscount={handleUpdateDiscount}
-            onRemoveItem={handleRemoveItem}
-            onOpenDrugEye={item => {
-              const idx = currentTab.items.findIndex(i => i.item_id === item.item_id);
-              setDrugEyeTargetItem({
-                item_id: item.item_id,
-                item_name: item.item_name,
-                generic_name: item.generic_name,
-                consumer_price: item.base_consumer_price,
-                package_units: item.package_units,
-                indexToSwap: idx >= 0 ? idx : undefined
-              });
-            }}
-          />
+        <div className="col-span-12 lg:col-span-8 h-full min-h-0 flex flex-col">
+          {/* M10: Clinical Guard & DDI Alert Banner */}
+          {cartAlerts.length > 0 && (
+            <div className="mb-2 p-2.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 space-y-1.5 shadow-2xs shrink-0 animate-in fade-in duration-150">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 font-bold text-xs">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>تنبيهات سريرية وتعارضات دوائية في السلة ({cartAlerts.length})</span>
+                </div>
+                <span className="text-[10px] bg-amber-200/80 px-2 py-0.5 rounded font-mono font-bold text-amber-900">
+                  Clinical Guard
+                </span>
+              </div>
+              <div className="space-y-1 max-h-24 overflow-y-auto">
+                {cartAlerts.map((alt, i) => (
+                  <div key={i} className="text-[11px] flex items-start gap-2 bg-white/80 p-1.5 rounded-lg border border-amber-200">
+                    <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold shrink-0 ${
+                      alt.severity === 'HIGH' ? 'bg-rose-100 text-rose-800 border border-rose-200' : 'bg-amber-100 text-amber-800'
+                    }`}>
+                      {alt.type === 'DUPLICATE_GENERIC' ? 'تكرار نفس المادة الفعالة' : `تعارض ${alt.severity === 'HIGH' ? 'عالي' : 'متوسط'}`}
+                    </span>
+                    <div className="flex-1">
+                      <span className="font-bold text-slate-900">{alt.itemA}</span> مع <span className="font-bold text-slate-900">{alt.itemB}</span>:
+                      <span className="text-slate-600 mr-1">{alt.clinical_note}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex-1 min-h-0">
+            <PosCartTable
+              items={currentTab.items}
+              onUpdateQuantity={handleUpdateQuantity}
+              onToggleUnit={handleToggleUnit}
+              onToggleTempPrice={handleToggleTempPrice}
+              onUpdateDiscount={handleUpdateDiscount}
+              onRemoveItem={handleRemoveItem}
+              onOpenDrugEye={item => {
+                const idx = currentTab.items.findIndex(i => i.item_id === item.item_id);
+                setDrugEyeTargetItem({
+                  item_id: item.item_id,
+                  item_name: item.item_name,
+                  generic_name: item.generic_name,
+                  consumer_price: item.base_consumer_price,
+                  package_units: item.package_units,
+                  indexToSwap: idx >= 0 ? idx : undefined
+                });
+              }}
+            />
+          </div>
         </div>
 
         {/* Right Column: Checkout & Payment Panel (col-span-4) */}
@@ -988,6 +1104,13 @@ export const PosView: React.FC<PosViewProps> = ({
             onChangeClientPhone={p => updateCurrentTab(t => ({ ...t, clientPhone: p }))}
             clientAddress={currentTab.clientAddress}
             onChangeClientAddress={a => updateCurrentTab(t => ({ ...t, clientAddress: a }))}
+            insuranceProviders={insuranceProviders}
+            selectedProviderId={currentTab.insuranceProviderId}
+            onChangeSelectedProviderId={id => updateCurrentTab(t => ({ ...t, insuranceProviderId: id }))}
+            insuranceCopayPct={currentTab.insuranceCopayPct}
+            onChangeInsuranceCopayPct={pct => updateCurrentTab(t => ({ ...t, insuranceCopayPct: pct }))}
+            patientCardNumber={currentTab.patientCardNumber}
+            onChangePatientCardNumber={num => updateCurrentTab(t => ({ ...t, patientCardNumber: num }))}
             isSaving={isSaving}
             onSave={() => executeSaveInvoice(false)}
             onSaveAndPrint={() => executeSaveInvoice(true)}
@@ -999,6 +1122,12 @@ export const PosView: React.FC<PosViewProps> = ({
       </div>
 
       {/* 4. Modals */}
+      {/* M10: Chronic Patients & Insurance Modal (F8) */}
+      <ChronicPatientsModal
+        isOpen={showChronicModal}
+        onClose={() => setShowChronicModal(false)}
+        onLoadPrescriptionToCart={handleLoadPrescriptionToCart}
+      />
       {/* 80mm Thermal Receipt Preview Modal */}
       {showReceiptModal && completedInvoice && (
         <ThermalReceiptModal

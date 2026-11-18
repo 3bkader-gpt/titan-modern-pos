@@ -59,7 +59,13 @@ import {
   ExpiryRiskItem,
   MergeItemsResult,
   DuplicateCandidatePair,
-  StockAndLedgerAuditReport
+  StockAndLedgerAuditReport,
+  ChronicPatient,
+  SaveChronicPatientPayload,
+  InsuranceProvider,
+  InsuranceClaimRecord,
+  CartInteractionCheckResult,
+  SubstitutesAndAlternativesResult
 } from '../shared/types';
 
 export const electronAPI = {
@@ -332,7 +338,35 @@ export const electronAPI = {
     ipcRenderer.invoke('inv:mergeDuplicateItems', primaryItemId, duplicateItemId, managerName),
 
   runStockAndLedgerIntegrityAudit: (): Promise<StockAndLedgerAuditReport> =>
-    ipcRenderer.invoke('inv:runIntegrityAudit')
+    ipcRenderer.invoke('inv:runIntegrityAudit'),
+
+  // M10: Chronic Patients, Insurance Providers & Claims, Generics vs Alternatives & DDI
+  getChronicPatients: (query?: string): Promise<ChronicPatient[]> =>
+    ipcRenderer.invoke('clinical:getChronicPatients', query),
+
+  saveChronicPatient: (payload: SaveChronicPatientPayload): Promise<ChronicPatient> =>
+    ipcRenderer.invoke('clinical:saveChronicPatient', payload),
+
+  deleteChronicPatient: (patientId: number): Promise<boolean> =>
+    ipcRenderer.invoke('clinical:deleteChronicPatient', patientId),
+
+  getInsuranceProviders: (): Promise<InsuranceProvider[]> =>
+    ipcRenderer.invoke('insurance:getProviders'),
+
+  saveInsuranceProvider: (provider: Partial<InsuranceProvider>): Promise<InsuranceProvider> =>
+    ipcRenderer.invoke('insurance:saveProvider', provider),
+
+  getInsuranceClaims: (providerId?: number, status?: string): Promise<InsuranceClaimRecord[]> =>
+    ipcRenderer.invoke('insurance:getClaims', providerId, status),
+
+  recordInsuranceSettlement: (providerId: number, paidAmount: number, notes?: string): Promise<{ success: boolean; newBalance: number; settledAmount: number }> =>
+    ipcRenderer.invoke('insurance:recordSettlement', providerId, paidAmount, notes),
+
+  checkCartInteractions: (items: Array<{ item_id: number; generic_name?: string; item_name_en?: string; item_name_ar?: string }>): Promise<CartInteractionCheckResult> =>
+    ipcRenderer.invoke('clinical:checkInteractions', items),
+
+  getSubstitutesAndAlternatives: (itemId: number): Promise<SubstitutesAndAlternativesResult> =>
+    ipcRenderer.invoke('clinical:getSubstitutesAndAlternatives', itemId)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

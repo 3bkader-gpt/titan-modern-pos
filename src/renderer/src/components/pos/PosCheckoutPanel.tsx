@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Customer, DiscountMode } from '../../../../shared/types';
+import { Customer, DiscountMode, InsuranceProvider } from '../../../../shared/types';
 import { 
   Banknote, 
   CreditCard, 
@@ -12,7 +12,8 @@ import {
   AlertTriangle,
   Plus,
   Coins,
-  ShieldAlert
+  ShieldAlert,
+  Shield
 } from 'lucide-react';
 
 interface PosCheckoutPanelProps {
@@ -43,6 +44,13 @@ interface PosCheckoutPanelProps {
   onOpenQuickReturn: () => void;
   hasItems: boolean;
   maxRecommendedDiscountPct?: number; // e.g. role max discount or 15% margin protection
+  insuranceProviders?: InsuranceProvider[];
+  selectedProviderId?: number;
+  onChangeSelectedProviderId?: (id: number | undefined) => void;
+  insuranceCopayPct?: number;
+  onChangeInsuranceCopayPct?: (pct: number) => void;
+  patientCardNumber?: string;
+  onChangePatientCardNumber?: (num: string) => void;
 }
 
 export const PosCheckoutPanel: React.FC<PosCheckoutPanelProps> = ({
@@ -72,13 +80,27 @@ export const PosCheckoutPanel: React.FC<PosCheckoutPanelProps> = ({
   onSaveAndPrint,
   onOpenQuickReturn,
   hasItems,
-  maxRecommendedDiscountPct = 15
+  maxRecommendedDiscountPct = 15,
+  insuranceProviders,
+  selectedProviderId,
+  onChangeSelectedProviderId,
+  insuranceCopayPct = 20,
+  onChangeInsuranceCopayPct,
+  patientCardNumber = '',
+  onChangePatientCardNumber
 }) => {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [showAddCustomer, setShowAddCustomer] = useState<boolean>(false);
   const [newCustName, setNewCustName] = useState<string>('');
   const [newCustPhone, setNewCustPhone] = useState<string>('');
   const [newCustAddr, setNewCustAddr] = useState<string>('');
+
+  const effectivePatientCopay = selectedProviderId
+    ? Math.round((netTotal * (insuranceCopayPct / 100)) * 100) / 100
+    : netTotal;
+  const effectiveCompanyClaim = selectedProviderId
+    ? Math.round((netTotal - effectivePatientCopay) * 100) / 100
+    : 0;
 
   useEffect(() => {
     if (window.electronAPI) {
@@ -113,7 +135,7 @@ export const PosCheckoutPanel: React.FC<PosCheckoutPanelProps> = ({
 
   const handleQuickTender = (addValue: number) => {
     if (addValue === 0) {
-      onChangePaidAmount(netTotal);
+      onChangePaidAmount(effectivePatientCopay);
     } else {
       onChangePaidAmount(paidAmount + addValue);
     }
@@ -247,6 +269,89 @@ export const PosCheckoutPanel: React.FC<PosCheckoutPanelProps> = ({
             <span className="text-xs font-mono text-slate-300">ج.م</span>
           </div>
         </div>
+      </div>
+
+      {/* 2.5 Insurance Provider Selection */}
+      <div className="mb-3 p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+            <Shield className="w-3.5 h-3.5 text-blue-600" />
+            <span>تعاقد تأمين طبي:</span>
+          </label>
+          {selectedProviderId && (
+            <button
+              type="button"
+              onClick={() => onChangeSelectedProviderId && onChangeSelectedProviderId(undefined)}
+              className="text-[10px] text-rose-600 hover:underline cursor-pointer"
+            >
+              إلغاء التأمين
+            </button>
+          )}
+        </div>
+
+        <select
+          value={selectedProviderId || ''}
+          onChange={(e) => {
+            const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
+            if (onChangeSelectedProviderId) onChangeSelectedProviderId(val);
+            if (val && insuranceProviders && onChangeInsuranceCopayPct) {
+              const p = insuranceProviders.find(pr => pr.provider_id === val);
+              if (p) onChangeInsuranceCopayPct(p.default_copay_pct);
+            }
+          }}
+          className="w-full px-2 py-1.5 text-xs rounded-lg border border-slate-300 bg-white"
+        >
+          <option value="">بدون تأمين (فاتورة عادية)</option>
+          {insuranceProviders?.map((p) => (
+            <option key={p.provider_id} value={p.provider_id}>
+              {p.provider_name} (تحمل: {p.default_copay_pct}%)
+            </option>
+          ))}
+        </select>
+
+        {selectedProviderId && (
+          <div className="mt-2 space-y-2 pt-2 border-t border-slate-200 text-xs">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-[10px] text-slate-500 block mb-0.5">نسبة تحمل المريض %</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={insuranceCopayPct !== undefined ? insuranceCopayPct : 20}
+                  onChange={(e) => onChangeInsuranceCopayPct && onChangeInsuranceCopayPct(parseFloat(e.target.value) || 0)}
+                  className="w-full px-2 py-1 text-xs font-mono font-bold border border-slate-300 rounded-lg bg-white"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] text-slate-500 block mb-0.5">رقم كارت التأمين</label>
+                <input
+                  type="text"
+                  placeholder="رقم الكارت..."
+                  value={patientCardNumber || ''}
+                  onChange={(e) => onChangePatientCardNumber && onChangePatientCardNumber(e.target.value)}
+                  className="w-full px-2 py-1 text-xs font-mono border border-slate-300 rounded-lg bg-white"
+                />
+              </div>
+            </div>
+
+            {/* Split breakdown */}
+            <div className="p-2 rounded-lg bg-blue-50/80 border border-blue-200 text-xs flex justify-between items-center">
+              <div>
+                <span className="text-[10px] text-blue-800 block">يدفعه المريض الآن:</span>
+                <span className="font-mono font-bold text-blue-950">
+                  {effectivePatientCopay.toFixed(2)} ج.م
+                </span>
+              </div>
+              <div className="text-left">
+                <span className="text-[10px] text-slate-500 block">مطالبة على الشركة:</span>
+                <span className="font-mono font-bold text-slate-800">
+                  {effectiveCompanyClaim.toFixed(2)} ج.م
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 3. Payment Method Switcher */}
@@ -426,7 +531,7 @@ export const PosCheckoutPanel: React.FC<PosCheckoutPanelProps> = ({
               step="any"
               value={paidAmount || ''}
               onChange={e => onChangePaidAmount(parseFloat(e.target.value) || 0)}
-              placeholder={netTotal.toFixed(2)}
+              placeholder={effectivePatientCopay.toFixed(2)}
               className="w-24 px-2 py-1 text-left font-mono font-bold text-xs rounded-lg border border-slate-300 focus:border-blue-500 outline-none"
             />
           </div>
@@ -473,9 +578,14 @@ export const PosCheckoutPanel: React.FC<PosCheckoutPanelProps> = ({
           {/* Change Display */}
           <div className="flex items-center justify-between p-2 rounded-lg bg-slate-50 border border-slate-200 text-xs">
             <span className="text-slate-600 font-medium">الباقي للعميل:</span>
-            <span className={`font-mono font-bold text-sm ${changeAmount > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
-              {changeAmount.toFixed(2)} ج.م
-            </span>
+            {(() => {
+              const displayChange = paidAmount > effectivePatientCopay ? paidAmount - effectivePatientCopay : 0;
+              return (
+                <span className={`font-mono font-bold text-sm ${displayChange > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+                  {displayChange.toFixed(2)} ج.م
+                </span>
+              );
+            })()}
           </div>
         </div>
       )}

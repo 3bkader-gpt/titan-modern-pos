@@ -159,6 +159,10 @@ export interface CreateSaleInvoicePayload {
   user_role?: UserRole;
   manager_override_pin?: string;
   override_manager_name?: string;
+  insurance_provider_id?: number;
+  insurance_copay_pct?: number;
+  patient_card_number?: string;
+  chronic_patient_id?: number;
 }
 
 export interface CreateSaleInvoiceResult {
@@ -177,6 +181,9 @@ export interface CreateSaleInvoiceResult {
   client_name?: string;
   client_phone?: string;
   client_address?: string;
+  patient_copay_amount?: number;
+  company_claim_amount?: number;
+  insurance_provider_name?: string;
 }
 
 export interface ReturnItemPayload {
@@ -572,6 +579,88 @@ export interface StockAndLedgerAuditReport {
   negative_stock_items: Array<{ item_id: number; item_name_en: string; current_stock: number }>;
   below_cost_items: Array<{ item_id: number; item_name_en: string; buy_price: number; consumer_price: number }>;
   gl_integrity: LedgerIntegrityStatus;
+}
+
+export interface ChronicPatientItem {
+  id: number;
+  patient_id: number;
+  item_id: number;
+  item_name_en?: string;
+  item_name_ar?: string;
+  consumer_price?: number;
+  current_stock?: number;
+  dosage_notes: string;
+  quantity: number;
+}
+
+export interface ChronicPatient {
+  patient_id: number;
+  patient_name: string;
+  phone: string;
+  conditions: string;
+  refill_interval_days: number;
+  last_refill_date: string;
+  next_due_date: string;
+  notes: string;
+  items?: ChronicPatientItem[];
+}
+
+export interface SaveChronicPatientPayload {
+  patient_id?: number;
+  patient_name: string;
+  phone?: string;
+  conditions?: string;
+  refill_interval_days?: number;
+  last_refill_date?: string;
+  next_due_date?: string;
+  notes?: string;
+  items?: Array<{ item_id: number; dosage_notes?: string; quantity?: number }>;
+}
+
+export interface InsuranceProvider {
+  provider_id: number;
+  provider_name: string;
+  default_copay_pct: number;
+  credit_balance: number;
+  contact_phone: string;
+  is_active: number;
+}
+
+export interface InsuranceClaimRecord {
+  claim_id: number;
+  provider_id: number;
+  provider_name?: string;
+  invoice_id: number;
+  patient_card_number: string;
+  patient_name: string;
+  total_invoice: number;
+  patient_copay_amount: number;
+  company_claim_amount: number;
+  status: 'PENDING' | 'SUBMITTED' | 'PAID';
+  claim_date: string;
+  paid_date: string;
+}
+
+export interface DrugInteractionAlert {
+  type: 'DUPLICATE_GENERIC' | 'DDI';
+  severity: 'HIGH' | 'MODERATE';
+  itemA: string;
+  itemB: string;
+  genericA: string;
+  genericB: string;
+  clinical_note: string;
+}
+
+export interface CartInteractionCheckResult {
+  hasAlerts: boolean;
+  alerts: DrugInteractionAlert[];
+}
+
+export interface SubstitutesAndAlternativesResult {
+  sameGeneric: Item[];
+  sameCategory: Item[];
+  sourceGeneric: string;
+  sourceCategory: string;
 }
 
 export interface SmartShortageFilter {

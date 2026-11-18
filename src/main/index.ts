@@ -72,7 +72,16 @@ import {
   getExpiryRiskReport,
   findDuplicateItemCandidates,
   mergeDuplicateItems,
-  runStockAndLedgerIntegrityAudit
+  runStockAndLedgerIntegrityAudit,
+  getChronicPatients,
+  saveChronicPatient,
+  deleteChronicPatient,
+  getInsuranceProviders,
+  saveInsuranceProvider,
+  getInsuranceClaims,
+  recordInsuranceSettlement,
+  checkCartInteractions,
+  getSubstitutesAndAlternatives
 } from './db';
 import { 
   performBackup, 
@@ -490,6 +499,43 @@ function registerIpcHandlers() {
 
   ipcMain.handle('inv:runIntegrityAudit', async () => {
     return runStockAndLedgerIntegrityAudit();
+  });
+
+  // M10: Chronic Patients, Insurance Providers & Claims, Generics vs Alternatives & DDI
+  ipcMain.handle('clinical:getChronicPatients', async (_event, query?: string) => {
+    return getChronicPatients(query);
+  });
+
+  ipcMain.handle('clinical:saveChronicPatient', async (_event, payload: Parameters<typeof saveChronicPatient>[0]) => {
+    return saveChronicPatient(payload);
+  });
+
+  ipcMain.handle('clinical:deleteChronicPatient', async (_event, patientId: number) => {
+    return deleteChronicPatient(patientId);
+  });
+
+  ipcMain.handle('insurance:getProviders', async () => {
+    return getInsuranceProviders();
+  });
+
+  ipcMain.handle('insurance:saveProvider', async (_event, provider: Parameters<typeof saveInsuranceProvider>[0]) => {
+    return saveInsuranceProvider(provider);
+  });
+
+  ipcMain.handle('insurance:getClaims', async (_event, providerId?: number, status?: string) => {
+    return getInsuranceClaims(providerId, status);
+  });
+
+  ipcMain.handle('insurance:recordSettlement', async (_event, providerId: number, paidAmount: number, notes?: string) => {
+    return recordInsuranceSettlement(providerId, paidAmount, notes);
+  });
+
+  ipcMain.handle('clinical:checkInteractions', async (_event, items: Parameters<typeof checkCartInteractions>[0]) => {
+    return checkCartInteractions(items);
+  });
+
+  ipcMain.handle('clinical:getSubstitutesAndAlternatives', async (_event, itemId: number) => {
+    return getSubstitutesAndAlternatives(itemId);
   });
 }
 
