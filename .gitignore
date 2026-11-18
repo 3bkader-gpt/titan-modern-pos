@@ -23,3 +23,9 @@ yarn-error.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Automated feature-gate sandbox DBs & baseline seal
+data/*.sandbox.sqlite
+data/*.sandbox.sqlite-wal
+data/*.sandbox.sqlite-shm
+data/.baseline_db.sha256

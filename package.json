@@ -13,7 +13,11 @@
     "package:dir": "npm run build && electron-builder --win --dir",
     "package:portable": "npm run build && electron-builder --win portable",
     "package": "npm run package:dir",
-    "verify": "tsx scripts/verify_phase1.ts"
+    "verify": "tsx scripts/verify_phase1.ts",
+    "gate:pre": "tsx scripts/feature_gate.ts pre",
+    "gate:post": "tsx scripts/feature_gate.ts post",
+    "gate:status": "tsx scripts/feature_gate.ts status",
+    "gate:selftest": "tsx scripts/feature_gate.ts selftest"
   },
   "dependencies": {
     "@fontsource/cairo": "^5.3.0",
