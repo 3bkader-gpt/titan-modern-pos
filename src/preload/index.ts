@@ -65,7 +65,14 @@ import {
   InsuranceProvider,
   InsuranceClaimRecord,
   CartInteractionCheckResult,
-  SubstitutesAndAlternativesResult
+  SubstitutesAndAlternativesResult,
+  StaffAttendanceLog,
+  ClockAttendanceResult,
+  StaffPerformanceItem,
+  LiveNetCapitalReport,
+  DailyClosingRecord,
+  ExecuteDailyClosingPayload,
+  ExecuteDailyClosingResult
 } from '../shared/types';
 
 export const electronAPI = {
@@ -366,7 +373,26 @@ export const electronAPI = {
     ipcRenderer.invoke('clinical:checkInteractions', items),
 
   getSubstitutesAndAlternatives: (itemId: number): Promise<SubstitutesAndAlternativesResult> =>
-    ipcRenderer.invoke('clinical:getSubstitutesAndAlternatives', itemId)
+    ipcRenderer.invoke('clinical:getSubstitutesAndAlternatives', itemId),
+
+  // M11: Staff Attendance, Incentives, Net Capital & EOD Daily Closing
+  clockStaffAttendance: (badgeBarcodeOrId: string | number, pinCode?: string): Promise<ClockAttendanceResult> =>
+    ipcRenderer.invoke('staff:clock', badgeBarcodeOrId, pinCode),
+
+  getStaffAttendanceLogs: (userId?: number, fromDate?: string, toDate?: string): Promise<StaffAttendanceLog[]> =>
+    ipcRenderer.invoke('staff:getAttendanceLogs', userId, fromDate, toDate),
+
+  getStaffSalesAndIncentivesReport: (fromDate: string, toDate: string): Promise<StaffPerformanceItem[]> =>
+    ipcRenderer.invoke('staff:getSalesIncentivesReport', fromDate, toDate),
+
+  getLiveNetCapitalReport: (): Promise<LiveNetCapitalReport> =>
+    ipcRenderer.invoke('reports:getLiveNetCapital'),
+
+  executeDailyClosing: (payload: ExecuteDailyClosingPayload): Promise<ExecuteDailyClosingResult> =>
+    ipcRenderer.invoke('eod:executeDailyClosing', payload),
+
+  getDailyClosings: (limit?: number): Promise<DailyClosingRecord[]> =>
+    ipcRenderer.invoke('eod:getDailyClosings', limit)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

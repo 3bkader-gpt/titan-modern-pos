@@ -31,12 +31,16 @@ import {
   Phone, 
   MapPin,
   Calendar,
-  Wallet
+  Wallet,
+  Barcode,
+  Lock
 } from 'lucide-react';
+import { StaffAttendancePanel } from '../components/treasury/StaffAttendancePanel';
+import { EodClosingPanel } from '../components/treasury/EodClosingPanel';
 
 export const TreasuryShiftsView: React.FC = () => {
-  // Main Subtabs: Treasury & Ledger | Shifts Handover | Customers & Delivery
-  const [subTab, setSubTab] = useState<'treasury' | 'shifts' | 'customers_delivery'>('treasury');
+  // Main Subtabs: Treasury & Ledger | Shifts Handover | Customers & Delivery | Attendance | EOD Closing
+  const [subTab, setSubTab] = useState<'treasury' | 'shifts' | 'customers_delivery' | 'attendance' | 'eod'>('treasury');
 
   // 1. Treasury State
   const [treasury, setTreasury] = useState<TreasuryOverview | null>(null);
@@ -371,6 +375,30 @@ export const TreasuryShiftsView: React.FC = () => {
             >
               <Users className="w-3.5 h-3.5" />
               <span>حسابات العملاء والدليفري</span>
+            </button>
+
+            <button
+              onClick={() => setSubTab('attendance')}
+              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 ${
+                subTab === 'attendance'
+                  ? 'bg-white text-blue-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Barcode className="w-3.5 h-3.5" />
+              <span>الحضور والانصراف</span>
+            </button>
+
+            <button
+              onClick={() => setSubTab('eod')}
+              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 ${
+                subTab === 'eod'
+                  ? 'bg-white text-indigo-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span>إغلاق اليوم (EOD)</span>
             </button>
           </div>
         </div>
@@ -973,6 +1001,16 @@ export const TreasuryShiftsView: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* ======================================================== */}
+      {/* 4. SUBTAB: STAFF BARCODE ATTENDANCE                      */}
+      {/* ======================================================== */}
+      {subTab === 'attendance' && <StaffAttendancePanel />}
+
+      {/* ======================================================== */}
+      {/* 5. SUBTAB: EOD CLOSING                                   */}
+      {/* ======================================================== */}
+      {subTab === 'eod' && <EodClosingPanel />}
 
       {/* ======================================================== */}
       {/* MODALS: ADD TRANSACTION / OPEN SHIFT / CLOSE SHIFT       */}

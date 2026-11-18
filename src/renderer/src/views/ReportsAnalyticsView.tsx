@@ -26,13 +26,16 @@ import {
   Sparkles,
   Search,
   CheckCircle2,
-  Clock
+  Clock,
+  Award
 } from 'lucide-react';
 import { downloadUtf8BomCsv } from '../components/common/ExportExcelButton';
+import { LiveNetCapitalCard } from '../components/reports/LiveNetCapitalCard';
+import { StaffPerformanceTab } from '../components/reports/StaffPerformanceTab';
 
 export const ReportsAnalyticsView: React.FC = () => {
   // Navigation Tabs inside Reports
-  const [activeTab, setActiveTab] = useState<'financial' | 'inventory_valuation' | 'movers_audit'>('financial');
+  const [activeTab, setActiveTab] = useState<'financial' | 'inventory_valuation' | 'movers_audit' | 'staff_performance'>('financial');
 
   // Date Filters for Financial Report
   const [dateFilter, setDateFilter] = useState<'today' | 'last7' | 'thisMonth' | 'lastMonth' | 'all'>('all');
@@ -197,6 +200,18 @@ export const ReportsAnalyticsView: React.FC = () => {
               <Activity className="w-3.5 h-3.5" />
               <span>الأكثر مبيعاً والرواكد والرقابة</span>
             </button>
+
+            <button
+              onClick={() => setActiveTab('staff_performance')}
+              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 ${
+                activeTab === 'staff_performance'
+                  ? 'bg-white text-indigo-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Award className="w-3.5 h-3.5" />
+              <span>أداء العاملين والعمولات</span>
+            </button>
           </div>
         </div>
       </div>
@@ -206,6 +221,9 @@ export const ReportsAnalyticsView: React.FC = () => {
       {/* ======================================================== */}
       {activeTab === 'financial' && (
         <div className="space-y-3">
+          {/* Live Net Capital Breakdown Card */}
+          <LiveNetCapitalCard />
+
           {/* Date Filter Strip */}
           <div className="bg-white rounded-xl border border-slate-200/90 p-3 shadow-2xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 text-xs">
             <div className="flex items-center gap-1.5">
@@ -821,6 +839,11 @@ export const ReportsAnalyticsView: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* ======================================================== */}
+      {/* TAB 4: STAFF PERFORMANCE & COMMISSIONS                   */}
+      {/* ======================================================== */}
+      {activeTab === 'staff_performance' && <StaffPerformanceTab />}
     </div>
   );
 };

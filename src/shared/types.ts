@@ -16,6 +16,7 @@ export interface Item {
   buy_price?: number | null;
   current_stock: number;
   expiry_date?: string | null;
+  incentive_bonus?: number;
   barcode?: string | null;
   barcode_source?: string | null;
   pharmacy_discount_percent?: number | null;
@@ -494,6 +495,7 @@ export interface SaveItemPayload {
   temp_price?: number;
   temp_price_active?: number;
   short_code?: string | null;
+  incentive_bonus?: number;
   min_stock?: number;
   max_stock?: number;
   auto_reorder?: number;
@@ -869,6 +871,7 @@ export interface UserAccount {
   role?: UserRole;
   allowed_tabs?: string;
   badge_barcode?: string;
+  pin_code?: string;
   max_discount_pct?: number;
   commission_pct?: number;
 }
@@ -1019,4 +1022,79 @@ export interface ChangeDataDirResult {
   mode?: 'migrated' | 'attached_existing' | 'confirmed_current';
   message?: string;
 }
+
+// M11: Staff Attendance, Incentives, Net Capital & EOD Closing
+export interface StaffAttendanceLog {
+  id: number;
+  user_id: number;
+  user_name: string;
+  work_date: string;
+  check_in_at: string;
+  check_out_at: string;
+  worked_minutes: number;
+  notes: string;
+}
+
+export interface ClockAttendanceResult {
+  success: boolean;
+  type: 'CHECK_IN' | 'CHECK_OUT';
+  record: StaffAttendanceLog;
+  message: string;
+}
+
+export interface StaffPerformanceItem {
+  user_id: number;
+  user_name: string;
+  role: string;
+  badge_barcode: string;
+  sales_count: number;
+  total_sales_amount: number;
+  total_returns_amount: number;
+  net_sales_amount: number;
+  commission_amount: number;
+  worked_hours: number;
+}
+
+export interface LiveNetCapitalReport {
+  inventory_cost_value: number;
+  cash_balance: number;
+  customer_receivables: number;
+  insurance_receivables: number;
+  suppliers_payable: number;
+  net_capital: number;
+  as_of_timestamp: string;
+  gl_integrity: LedgerIntegrityStatus;
+}
+
+export interface DailyClosingRecord {
+  closing_id: number;
+  closing_date: string;
+  expected_cash: number;
+  counted_cash: number;
+  cash_variance: number;
+  total_sales: number;
+  total_returns: number;
+  total_purchases: number;
+  total_expenses: number;
+  net_capital_snapshot: number;
+  closed_by_user_id: number;
+  closed_by_user_name: string;
+  backup_status: string;
+  closed_at: string;
+}
+
+export interface ExecuteDailyClosingPayload {
+  closing_date?: string;
+  counted_cash: number;
+  notes?: string;
+  closed_by_user_id: number;
+  closed_by_user_name: string;
+}
+
+export interface ExecuteDailyClosingResult {
+  closing: DailyClosingRecord;
+  backup_completed: boolean;
+  gl_variance_posted: boolean;
+}
+
 

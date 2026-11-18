@@ -81,7 +81,14 @@ import {
   getInsuranceClaims,
   recordInsuranceSettlement,
   checkCartInteractions,
-  getSubstitutesAndAlternatives
+  getSubstitutesAndAlternatives,
+  getDatabaseInstance,
+  clockStaffAttendance,
+  getStaffAttendanceLogs,
+  getStaffSalesAndIncentivesReport,
+  getLiveNetCapitalReport,
+  executeDailyClosing,
+  getDailyClosings
 } from './db';
 import { 
   performBackup, 
@@ -108,7 +115,8 @@ import {
   RecordSupplierPaymentPayload,
   CreatePurchaseReturnPayload,
   UserRole,
-  UpdateSaleInvoicePayload
+  UpdateSaleInvoicePayload,
+  ExecuteDailyClosingPayload
 } from '../shared/types';
 
 import fs from 'fs';
@@ -536,6 +544,44 @@ function registerIpcHandlers() {
 
   ipcMain.handle('clinical:getSubstitutesAndAlternatives', async (_event, itemId: number) => {
     return getSubstitutesAndAlternatives(itemId);
+  });
+
+  // M11: Staff Attendance, Incentives, Net Capital & EOD Daily Closing
+  ipcMain.handle('staff:clock', async (_event, badgeBarcodeOrId: string | number, pinCode?: string) => {
+    return clockStaffAttendance(badgeBarcodeOrId, pinCode);
+  });
+
+  ipcMain.handle('staff:getAttendanceLogs', async (_event, userId?: number, fromDate?: string, toDate?: string) => {
+    return getStaffAttendanceLogs(userId, fromDate, toDate);
+  });
+
+  ipcMain.handle('staff:getSalesIncentivesReport', async (_event, fromDate: string, toDate: string) => {
+    return getStaffSalesAndIncentivesReport(fromDate, toDate);
+  });
+
+  ipcMain.handle('reports:getLiveNetCapital', async () => {
+    return getLiveNetCapitalReport();
+  });
+
+  ipcMain.handle('eod:executeDailyClosing', async (_event, payload: ExecuteDailyClosingPayload) => {
+    const result = executeDailyClosing(payload);
+    try {
+      const backupRes = await performBackup();
+      if (backupRes && backupRes.status === 'SUCCESS') {
+        result.backup_completed = true;
+        const db = getDatabaseInstance();
+        db.prepare("UPDATE daily_closings SET backup_status = 'COMPLETED' WHERE closing_id = ?").run(result.closing.closing_id);
+        result.closing.backup_status = 'COMPLETED';
+      }
+    } catch (backupErr) {
+      console.error('Backup after EOD failed:', backupErr);
+      result.backup_completed = false;
+    }
+    return result;
+  });
+
+  ipcMain.handle('eod:getDailyClosings', async (_event, limit?: number) => {
+    return getDailyClosings(limit);
   });
 }
 

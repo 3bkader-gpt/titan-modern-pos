@@ -74,7 +74,14 @@ import {
   InsuranceClaimRecord,
   DrugInteractionAlert,
   CartInteractionCheckResult,
-  SubstitutesAndAlternativesResult
+  SubstitutesAndAlternativesResult,
+  StaffAttendanceLog,
+  ClockAttendanceResult,
+  StaffPerformanceItem,
+  LiveNetCapitalReport,
+  DailyClosingRecord,
+  ExecuteDailyClosingPayload,
+  ExecuteDailyClosingResult
 } from '../shared/types';
 import { calculateInvoicePricing } from '../shared/pricing';
 import { computePhoneticKey, toWildcardSqlPattern } from '../shared/phonetic';
@@ -540,6 +547,41 @@ function ensureSchemaUpgrades(database: Database.Database) {
       insertDdi.run('omeprazole', 'clopidogrel', 'MODERATE', 'انخفاض الفعالية المضادة لتكتل الصفائح نتيجة تنافس تثبيط إنزيم CYP2C19');
       insertDdi.run('clopidogrel', 'omeprazole', 'MODERATE', 'انخفاض الفعالية المضادة لتكتل الصفائح نتيجة تنافس تثبيط إنزيم CYP2C19');
     }
+
+    // M11: Staff Barcode Attendance, Item Incentive Bonus & Daily Closings
+    safeAddColumn('items', 'incentive_bonus REAL DEFAULT 0');
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS staff_attendance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,
+        work_date TEXT NOT NULL,
+        check_in_at TEXT NOT NULL,
+        check_out_at TEXT DEFAULT '',
+        worked_minutes INTEGER DEFAULT 0,
+        notes TEXT DEFAULT '',
+        FOREIGN KEY(user_id) REFERENCES users(user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_staff_att_user_date ON staff_attendance(user_id, work_date);
+
+      CREATE TABLE IF NOT EXISTS daily_closings (
+        closing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        closing_date TEXT NOT NULL UNIQUE,
+        expected_cash REAL NOT NULL,
+        counted_cash REAL NOT NULL,
+        cash_variance REAL NOT NULL,
+        total_sales REAL NOT NULL,
+        total_returns REAL NOT NULL,
+        total_purchases REAL NOT NULL,
+        total_expenses REAL NOT NULL,
+        net_capital_snapshot REAL NOT NULL,
+        closed_by_user_id INTEGER NOT NULL,
+        closed_by_user_name TEXT NOT NULL,
+        backup_status TEXT DEFAULT '',
+        closed_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_daily_closings_date ON daily_closings(closing_date);
+    `);
 
     // Ensure Dr. Mariam Elhomeily account exists in users table
     const existingDoctor = database.prepare("SELECT * FROM users WHERE user_name LIKE '%مريم%' OR user_name LIKE '%الحميلي%'").get();
@@ -2268,6 +2310,7 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
           temp_price = COALESCE(?, temp_price),
           temp_price_active = COALESCE(?, temp_price_active),
           short_code = COALESCE(?, short_code),
+          incentive_bonus = COALESCE(?, incentive_bonus),
           phonetic_key = ?
         WHERE item_id = ?
       `).run(
@@ -2289,6 +2332,7 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         itemData.temp_price ?? existing.temp_price ?? 0,
         itemData.temp_price_active ?? existing.temp_price_active ?? 0,
         itemData.short_code ?? existing.short_code ?? '',
+        itemData.incentive_bonus !== undefined ? itemData.incentive_bonus : null,
         nextPhonetic || String(itemData.item_id),
         itemData.item_id
       );
@@ -2324,8 +2368,8 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
           item_id, barcode, item_name_en, item_name_ar, producer, generic_name, category,
           consumer_price, previous_price, package_units, discount_pct, buy_price,
           current_stock, expiry_date, pharmacy_discount_percent, tax_schedule_category,
-          temp_price, temp_price_active, short_code, phonetic_key
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          temp_price, temp_price_active, short_code, incentive_bonus, phonetic_key
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         newItemId,
         barcode,
@@ -2346,6 +2390,7 @@ export function saveOrUpdateItem(itemData: SaveItemPayload): Item {
         itemData.temp_price || 0,
         itemData.temp_price_active || 0,
         itemData.short_code?.trim() || '',
+        itemData.incentive_bonus || 0,
         newPhonetic || String(newItemId)
       );
 
@@ -6750,6 +6795,453 @@ export function getSubstitutesAndAlternatives(itemId: number): SubstitutesAndAlt
     sourceGeneric: gen,
     sourceCategory: cat
   };
+}
+
+// ============================================================================
+// MODULE 11: Staff Attendance, Incentives, Net Capital & EOD Daily Closing
+// ============================================================================
+
+export function clockStaffAttendance(
+  badgeBarcodeOrId: string | number,
+  pinCode?: string,
+  database?: Database.Database
+): ClockAttendanceResult {
+  const d = database || getDatabaseInstance();
+  const raw = String(badgeBarcodeOrId || '').trim();
+  if (!raw) {
+    throw new Error('يرجى مسح باركود الموظف أو إدخال الرقم التعريفي.');
+  }
+
+  let user: UserAccount | undefined;
+  if (/^\d+$/.test(raw)) {
+    const numId = Number(raw);
+    user = d.prepare('SELECT * FROM users WHERE user_id = ? OR badge_barcode = ?').get(numId, raw) as UserAccount | undefined;
+  } else {
+    user = d.prepare('SELECT * FROM users WHERE badge_barcode = ? OR user_name = ?').get(raw, raw) as UserAccount | undefined;
+  }
+
+  if (!user) {
+    throw new Error(`الموظف غير موجود أو باركود الكارنيه (${raw}) غير مسجل.`);
+  }
+
+  if (Number(user.is_active) === 0) {
+    throw new Error(`حساب الموظف (${user.user_name}) معطل.`);
+  }
+
+  if (pinCode && user.pin_code && user.pin_code.trim() !== '') {
+    if (user.pin_code.trim() !== pinCode.trim()) {
+      throw new Error('كود PIN غير صحيح للموظف.');
+    }
+  }
+
+  const local = getLocalDateTime();
+  const workDate = local.date;
+  const currentTimestamp = local.timestamp;
+
+  // Check if open attendance record exists for today (check_out_at = '' or NULL)
+  const openRecord = d.prepare(`
+    SELECT * FROM staff_attendance 
+    WHERE user_id = ? AND work_date = ? AND (check_out_at IS NULL OR check_out_at = '')
+    ORDER BY id DESC LIMIT 1
+  `).get(user.user_id, workDate) as StaffAttendanceLog | undefined;
+
+  if (openRecord) {
+    // Clock OUT
+    const inTime = new Date(openRecord.check_in_at.replace(' ', 'T')).getTime();
+    const outTime = new Date(currentTimestamp.replace(' ', 'T')).getTime();
+    const diffMinutes = Math.round((outTime - inTime) / 60000);
+    const workedMinutes = diffMinutes > 0 ? diffMinutes : 1;
+
+    d.prepare(`
+      UPDATE staff_attendance
+      SET check_out_at = ?, worked_minutes = ?
+      WHERE id = ?
+    `).run(currentTimestamp, workedMinutes, openRecord.id);
+
+    const updated = d.prepare('SELECT * FROM staff_attendance WHERE id = ?').get(openRecord.id) as StaffAttendanceLog;
+    return {
+      success: true,
+      type: 'CHECK_OUT',
+      record: updated,
+      message: `تم تسجيل انصراف الموظف (${user.user_name}) بنجاح. مدة العمل: ${workedMinutes} دقيقة.`
+    };
+  } else {
+    // Clock IN
+    const insertRes = d.prepare(`
+      INSERT INTO staff_attendance (user_id, user_name, work_date, check_in_at, check_out_at, worked_minutes, notes)
+      VALUES (?, ?, ?, ?, '', 0, '')
+    `).run(user.user_id, user.user_name, workDate, currentTimestamp);
+
+    const created = d.prepare('SELECT * FROM staff_attendance WHERE id = ?').get(insertRes.lastInsertRowid) as StaffAttendanceLog;
+    return {
+      success: true,
+      type: 'CHECK_IN',
+      record: created,
+      message: `تم تسجيل حضور الموظف (${user.user_name}) بنجاح في تمام الساعة ${local.time}.`
+    };
+  }
+}
+
+export function getStaffAttendanceLogs(
+  userId?: number,
+  fromDate?: string,
+  toDate?: string,
+  database?: Database.Database
+): StaffAttendanceLog[] {
+  const d = database || getDatabaseInstance();
+  const conditions: string[] = [];
+  const params: any[] = [];
+
+  if (userId) {
+    conditions.push('user_id = ?');
+    params.push(userId);
+  }
+  if (fromDate) {
+    conditions.push('work_date >= ?');
+    params.push(fromDate);
+  }
+  if (toDate) {
+    conditions.push('work_date <= ?');
+    params.push(toDate);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  return d.prepare(`
+    SELECT * FROM staff_attendance
+    ${whereClause}
+    ORDER BY work_date DESC, id DESC
+    LIMIT 500
+  `).all(...params) as StaffAttendanceLog[];
+}
+
+export function getStaffSalesAndIncentivesReport(
+  fromDate: string,
+  toDate: string,
+  database?: Database.Database
+): StaffPerformanceItem[] {
+  const d = database || getDatabaseInstance();
+  const start = fromDate || '2026-01-01';
+  const end = toDate || getLocalDateTime().date;
+
+  const users = d.prepare(`
+    SELECT user_id, user_name, role, badge_barcode, commission_pct
+    FROM users
+    WHERE is_active = 1 OR user_id IN (
+      SELECT DISTINCT user_id FROM sales_invoices WHERE invoice_date BETWEEN ? AND ?
+    )
+    ORDER BY user_id ASC
+  `).all(start, end) as Array<{
+    user_id: number;
+    user_name: string;
+    role: string;
+    badge_barcode: string;
+    commission_pct: number;
+  }>;
+
+  const result: StaffPerformanceItem[] = [];
+
+  for (const u of users) {
+    // 1. Sales count & total
+    const salesRow = d.prepare(`
+      SELECT 
+        COUNT(DISTINCT invoice_number) as sales_count,
+        COALESCE(SUM(total_selling_price - COALESCE(discount, 0)), 0) as total_sales
+      FROM sales_invoices
+      WHERE user_id = ? AND invoice_date BETWEEN ? AND ?
+    `).get(u.user_id, start, end) as { sales_count: number; total_sales: number };
+
+    const salesCount = Number(salesRow?.sales_count || 0);
+    const totalSalesAmount = roundMoney(salesRow?.total_sales || 0);
+
+    // 2. Returns
+    const returnsRow = d.prepare(`
+      SELECT COALESCE(SUM(sr.refund_amount), 0) as total_returns
+      FROM sales_returns sr
+      JOIN sales_invoices si ON si.invoice_number = sr.invoice_number
+      WHERE si.user_id = ? AND sr.return_date BETWEEN ? AND ?
+    `).get(u.user_id, start, end) as { total_returns: number };
+
+    const totalReturnsAmount = roundMoney(returnsRow?.total_returns || 0);
+    const netSalesAmount = roundMoney(Math.max(0, totalSalesAmount - totalReturnsAmount));
+
+    // 3. Item-specific incentives (bonus per piece sold)
+    const incentiveRow = d.prepare(`
+      SELECT COALESCE(SUM(sii.quantity * COALESCE(i.incentive_bonus, 0)), 0) as total_bonus
+      FROM sales_invoice_items sii
+      JOIN sales_invoices si ON si.invoice_number = sii.invoice_number
+      JOIN items i ON i.item_id = sii.item_id
+      WHERE si.user_id = ? AND si.invoice_date BETWEEN ? AND ?
+    `).get(u.user_id, start, end) as { total_bonus: number };
+
+    const itemBonus = roundMoney(incentiveRow?.total_bonus || 0);
+
+    // 4. Percentage commission on net sales
+    const userCommPct = Number(u.commission_pct || 0);
+    const pctCommission = roundMoney(netSalesAmount * (userCommPct / 100));
+    const totalCommission = roundMoney(itemBonus + pctCommission);
+
+    // 5. Worked hours from attendance
+    const attRow = d.prepare(`
+      SELECT COALESCE(SUM(worked_minutes), 0) as total_minutes
+      FROM staff_attendance
+      WHERE user_id = ? AND work_date BETWEEN ? AND ?
+    `).get(u.user_id, start, end) as { total_minutes: number };
+
+    const totalMinutes = Number(attRow?.total_minutes || 0);
+    const workedHours = totalMinutes > 0 ? Math.max(0.1, Math.round((totalMinutes / 60) * 10) / 10) : 0;
+
+    result.push({
+      user_id: u.user_id,
+      user_name: u.user_name,
+      role: u.role || 'CASHIER',
+      badge_barcode: u.badge_barcode || `EMP-${u.user_id}`,
+      sales_count: salesCount,
+      total_sales_amount: totalSalesAmount,
+      total_returns_amount: totalReturnsAmount,
+      net_sales_amount: netSalesAmount,
+      commission_amount: totalCommission,
+      worked_hours: workedHours
+    });
+  }
+
+  return result;
+}
+
+export function getLiveNetCapitalReport(database?: Database.Database): LiveNetCapitalReport {
+  const d = database || getDatabaseInstance();
+
+  // 1. Inventory Cost Value (items with current_stock > 0)
+  const invRow = d.prepare(`
+    SELECT ROUND(COALESCE(SUM(
+      current_stock * (CASE WHEN COALESCE(buy_price, 0) > 0 THEN buy_price ELSE COALESCE(consumer_price, 0) * 0.75 END)
+    ), 0), 2) as total_cost
+    FROM items WHERE current_stock > 0
+  `).get() as { total_cost: number };
+  const inventoryCostValue = roundMoney(invRow?.total_cost ?? 0);
+
+  // 2. Cash Balance from treasury_state
+  const treasuryRow = d.prepare('SELECT cash_balance FROM treasury_state WHERE id = 1').get() as { cash_balance: number } | undefined;
+  const cashBalance = roundMoney(treasuryRow?.cash_balance ?? 0);
+
+  // 3. Customer Receivables (from GL or customers table)
+  const custGlRow = d.prepare(`
+    SELECT COALESCE(ROUND(SUM(debit - credit), 2), 0) as bal
+    FROM general_ledger_2026
+    WHERE account_name LIKE 'اصول.متداولة.عملاء%'
+  `).get() as { bal: number };
+  const custTable = d.prepare('SELECT COALESCE(ROUND(SUM(account_balance), 2), 0) as bal FROM customers').get() as { bal: number };
+  const customerReceivables = roundMoney(custGlRow?.bal ?? custTable?.bal ?? 0);
+
+  // 4. Insurance Receivables (from GL)
+  const insGlRow = d.prepare(`
+    SELECT COALESCE(ROUND(SUM(debit - credit), 2), 0) as bal
+    FROM general_ledger_2026
+    WHERE account_name LIKE 'اصول.متداولة.ذمم شركات تامين%'
+  `).get() as { bal: number };
+  const insuranceReceivables = roundMoney(insGlRow?.bal ?? 0);
+
+  // 5. Suppliers Payable (from GL)
+  const suppliersPayable = getTotalSuppliersGlPayable(d);
+
+  // 6. Net Capital Formula:
+  // Net Capital = Inventory Cost Value + Cash Balance + Customer Receivables + Insurance Receivables - Suppliers Payable
+  const netCapital = roundMoney(
+    inventoryCostValue + cashBalance + customerReceivables + insuranceReceivables - suppliersPayable
+  );
+
+  const local = getLocalDateTime();
+  const glIntegrity = checkLedgerIntegrity(d);
+
+  return {
+    inventory_cost_value: inventoryCostValue,
+    cash_balance: cashBalance,
+    customer_receivables: customerReceivables,
+    insurance_receivables: insuranceReceivables,
+    suppliers_payable: suppliersPayable,
+    net_capital: netCapital,
+    as_of_timestamp: local.timestamp,
+    gl_integrity: glIntegrity
+  };
+}
+
+export function executeDailyClosing(
+  payload: ExecuteDailyClosingPayload,
+  database?: Database.Database
+): ExecuteDailyClosingResult {
+  const d = database || getDatabaseInstance();
+
+  return d.transaction(() => {
+    const local = getLocalDateTime();
+    const closingDate = payload.closing_date || local.date;
+
+    // 1. Guard against duplicate closing for same date
+    const existing = d.prepare('SELECT * FROM daily_closings WHERE closing_date = ?').get(closingDate) as DailyClosingRecord | undefined;
+    if (existing) {
+      throw new Error(`تم إغلاق يومية تاريخ ${closingDate} مسبقاً (رقم الإغلاق #${existing.closing_id}). لا يمكن الإغلاق مرتين لنفس اليوم.`);
+    }
+
+    // 2. Expected cash from treasury_state
+    const treasuryRow = d.prepare('SELECT cash_balance FROM treasury_state WHERE id = 1').get() as { cash_balance: number } | undefined;
+    const expectedCash = roundMoney(treasuryRow?.cash_balance ?? 0);
+    const countedCash = roundMoney(payload.counted_cash);
+    const cashVariance = roundMoney(countedCash - expectedCash);
+
+    // 3. Totals for closingDate
+    const salesRow = d.prepare(`
+      SELECT COALESCE(SUM(total_selling_price - COALESCE(discount, 0)), 0) as s
+      FROM sales_invoices
+      WHERE invoice_date = ?
+    `).get(closingDate) as { s: number };
+    const totalSales = roundMoney(salesRow?.s ?? 0);
+
+    const returnsRow = d.prepare(`
+      SELECT COALESCE(SUM(refund_amount), 0) as r
+      FROM sales_returns
+      WHERE return_date = ?
+    `).get(closingDate) as { r: number };
+    const totalReturns = roundMoney(returnsRow?.r ?? 0);
+
+    const purchasesRow = d.prepare(`
+      SELECT COALESCE(SUM(total_amount), 0) as p
+      FROM purchases_invoices
+      WHERE invoice_date = ?
+    `).get(closingDate) as { p: number };
+    const totalPurchases = roundMoney(purchasesRow?.p ?? 0);
+
+    const expensesRow = d.prepare(`
+      SELECT COALESCE(SUM(debit), 0) as e
+      FROM general_ledger_2026
+      WHERE entry_date = ? AND account_name LIKE 'مصروفات%'
+    `).get(closingDate) as { e: number };
+    const totalExpenses = roundMoney(expensesRow?.e ?? 0);
+
+    // 4. Balanced GL posting for cash variance if !== 0
+    let glVariancePosted = false;
+    if (Math.abs(cashVariance) >= 0.01) {
+      const absVariance = roundMoney(Math.abs(cashVariance));
+      const docRef = `EOD-${closingDate}`;
+
+      if (cashVariance < 0) {
+        // Cash deficit (عجز خزينة): debit expense, credit cash
+        postBalancedGlLines(d, closingDate, docRef, [
+          {
+            account_name: 'مصروفات.تشغيلية.عجز خزينة',
+            notes: `عجز خزينة إغلاق يومية ${closingDate} بواسطة ${payload.closed_by_user_name}`,
+            debit: absVariance,
+            credit: 0
+          },
+          {
+            account_name: 'اصول.متداولة.نقدية.كاش',
+            notes: `تسوية عجز خزينة إغلاق يومية ${closingDate}`,
+            debit: 0,
+            credit: absVariance
+          }
+        ]);
+      } else {
+        // Cash surplus (زيادة خزينة): debit cash, credit revenue
+        postBalancedGlLines(d, closingDate, docRef, [
+          {
+            account_name: 'اصول.متداولة.نقدية.كاش',
+            notes: `تسوية زيادة خزينة إغلاق يومية ${closingDate}`,
+            debit: absVariance,
+            credit: 0
+          },
+          {
+            account_name: 'ايرادات.زيادة خزينة',
+            notes: `زيادة خزينة إغلاق يومية ${closingDate} بواسطة ${payload.closed_by_user_name}`,
+            debit: 0,
+            credit: absVariance
+          }
+        ]);
+      }
+
+      // Update treasury cash_balance to the actual counted cash
+      d.prepare(`
+        UPDATE treasury_state
+        SET cash_balance = ?, last_updated = ?
+        WHERE id = 1
+      `).run(countedCash, local.timestamp);
+
+      glVariancePosted = true;
+    }
+
+    // 5. Lock all sales invoices for the closing date
+    d.prepare(`
+      UPDATE sales_invoices
+      SET is_locked = 1
+      WHERE invoice_date = ?
+    `).run(closingDate);
+
+    // 6. Net capital snapshot
+    const invRow = d.prepare(`
+      SELECT ROUND(COALESCE(SUM(
+        current_stock * (CASE WHEN COALESCE(buy_price, 0) > 0 THEN buy_price ELSE COALESCE(consumer_price, 0) * 0.75 END)
+      ), 0), 2) as total_cost
+      FROM items WHERE current_stock > 0
+    `).get() as { total_cost: number };
+    const invCost = roundMoney(invRow?.total_cost ?? 0);
+
+    const updatedTreasury = d.prepare('SELECT cash_balance FROM treasury_state WHERE id = 1').get() as { cash_balance: number } | undefined;
+    const finalCash = roundMoney(updatedTreasury?.cash_balance ?? countedCash);
+
+    const custGlRow = d.prepare(`
+      SELECT COALESCE(ROUND(SUM(debit - credit), 2), 0) as bal
+      FROM general_ledger_2026
+      WHERE account_name LIKE 'اصول.متداولة.عملاء%'
+    `).get() as { bal: number };
+    const custTable = d.prepare('SELECT COALESCE(ROUND(SUM(account_balance), 2), 0) as bal FROM customers').get() as { bal: number };
+    const custRecv = roundMoney(custGlRow?.bal ?? custTable?.bal ?? 0);
+
+    const insGlRow = d.prepare(`
+      SELECT COALESCE(ROUND(SUM(debit - credit), 2), 0) as bal
+      FROM general_ledger_2026
+      WHERE account_name LIKE 'اصول.متداولة.ذمم شركات تامين%'
+    `).get() as { bal: number };
+    const insRecv = roundMoney(insGlRow?.bal ?? 0);
+
+    const supPay = getTotalSuppliersGlPayable(d);
+    const netCapitalSnapshot = roundMoney(invCost + finalCash + custRecv + insRecv - supPay);
+
+    // 7. Insert into daily_closings
+    const insertRes = d.prepare(`
+      INSERT INTO daily_closings (
+        closing_date, expected_cash, counted_cash, cash_variance,
+        total_sales, total_returns, total_purchases, total_expenses,
+        net_capital_snapshot, closed_by_user_id, closed_by_user_name,
+        backup_status, closed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+    `).run(
+      closingDate,
+      expectedCash,
+      countedCash,
+      cashVariance,
+      totalSales,
+      totalReturns,
+      totalPurchases,
+      totalExpenses,
+      netCapitalSnapshot,
+      payload.closed_by_user_id,
+      payload.closed_by_user_name,
+      local.timestamp
+    );
+
+    const closingRecord = d.prepare('SELECT * FROM daily_closings WHERE closing_id = ?').get(insertRes.lastInsertRowid) as DailyClosingRecord;
+
+    return {
+      closing: closingRecord,
+      backup_completed: false,
+      gl_variance_posted: glVariancePosted
+    };
+  })();
+}
+
+export function getDailyClosings(limit: number = 30, database?: Database.Database): DailyClosingRecord[] {
+  const d = database || getDatabaseInstance();
+  return d.prepare(`
+    SELECT * FROM daily_closings
+    ORDER BY closing_date DESC, closing_id DESC
+    LIMIT ?
+  `).all(limit) as DailyClosingRecord[];
 }
 
 
