@@ -21,6 +21,11 @@ import {
   CreatePurchaseItemPayload,
   CreatePurchaseInvoicePayload,
   CreatePurchaseInvoiceResult,
+  SupplierStatementEntry,
+  SupplierStatementReport,
+  RecordSupplierPaymentPayload,
+  CreatePurchaseReturnPayload,
+  PurchaseReturnRecord,
   ShortageItem,
   SaveItemPayload,
   LedgerEntry,
@@ -224,6 +229,45 @@ function ensureSchemaUpgrades(database: Database.Database) {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_login_audit_date ON login_audit_log(created_at);
+    `);
+
+    // M2: Full Suppliers Ledger & Purchase/Expiry Returns
+    safeAddColumn('suppliers', "tax_id TEXT DEFAULT ''");
+    safeAddColumn('suppliers', "address TEXT DEFAULT ''");
+    safeAddColumn('suppliers', 'credit_limit REAL DEFAULT 0');
+    safeAddColumn('suppliers', 'opening_balance REAL DEFAULT 0');
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS purchase_returns (
+        return_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        supplier_id INTEGER NOT NULL,
+        supplier_name TEXT NOT NULL,
+        original_purchase_id INTEGER DEFAULT 0,
+        return_type TEXT NOT NULL,
+        settlement_mode TEXT NOT NULL,
+        total_cost_value REAL NOT NULL,
+        credit_amount REAL NOT NULL,
+        expiry_loss_amount REAL DEFAULT 0,
+        user_id INTEGER DEFAULT 99,
+        cashier_name TEXT DEFAULT 'د. مريم الحميلي',
+        notes TEXT DEFAULT '',
+        return_date TEXT NOT NULL,
+        FOREIGN KEY(supplier_id) REFERENCES suppliers(supplier_id)
+      );
+      CREATE TABLE IF NOT EXISTS purchase_return_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        return_id INTEGER NOT NULL,
+        item_id INTEGER NOT NULL,
+        item_name TEXT NOT NULL,
+        quantity REAL NOT NULL,
+        unit_cost REAL NOT NULL,
+        line_total REAL NOT NULL,
+        expiry_date TEXT DEFAULT '',
+        FOREIGN KEY(return_id) REFERENCES purchase_returns(return_id),
+        FOREIGN KEY(item_id) REFERENCES items(item_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_pur_ret_supp ON purchase_returns(supplier_id);
+      CREATE INDEX IF NOT EXISTS idx_pur_ret_items_ret ON purchase_return_items(return_id);
     `);
 
     // Ensure Dr. Mariam Elhomeily account exists in users table
@@ -2030,17 +2074,65 @@ export function getSuppliers(): Supplier[] {
       s.supplier_id,
       s.supplier_name,
       s.contact_phone,
-      COALESCE(SUM(p.total_amount), 0) as total_purchases,
-      MAX(p.invoice_date) as last_invoice_date,
-      count(p.purchase_invoice_id) as invoices_count
+      COALESCE(s.tax_id, '') as tax_id,
+      COALESCE(s.address, '') as address,
+      COALESCE(s.credit_limit, 0) as credit_limit,
+      COALESCE(s.opening_balance, 0) as opening_balance,
+      COALESCE((
+        SELECT SUM(p.total_amount)
+        FROM purchases_invoices p
+        WHERE p.supplier_id = s.supplier_id
+      ), 0) as total_purchases,
+      COALESCE((
+        SELECT SUM(ABS(st.amount))
+        FROM supplier_transactions st
+        WHERE st.supplier_id = s.supplier_id
+          AND st.transaction_type IN ('سداد دفعة مورد', 'سداد دفعة نقدية')
+      ), 0) as total_paid,
+      COALESCE((
+        SELECT SUM(pr.credit_amount)
+        FROM purchase_returns pr
+        WHERE pr.supplier_id = s.supplier_id
+          AND pr.settlement_mode = 'SUPPLIER_CREDIT'
+      ), 0) as total_returns,
+      ROUND(
+        COALESCE(s.opening_balance, 0)
+        + COALESCE((
+            SELECT SUM(p.total_amount)
+            FROM purchases_invoices p
+            WHERE p.supplier_id = s.supplier_id
+              AND COALESCE(p.payment_method, 'آجل') NOT IN ('نقدي', 'CASH')
+          ), 0)
+        - COALESCE((
+            SELECT SUM(ABS(st.amount))
+            FROM supplier_transactions st
+            WHERE st.supplier_id = s.supplier_id
+              AND st.transaction_type IN ('سداد دفعة مورد', 'سداد دفعة نقدية')
+          ), 0)
+        - COALESCE((
+            SELECT SUM(pr.credit_amount)
+            FROM purchase_returns pr
+            WHERE pr.supplier_id = s.supplier_id
+              AND pr.settlement_mode = 'SUPPLIER_CREDIT'
+          ), 0),
+        2
+      ) as current_balance,
+      (SELECT MAX(p.invoice_date) FROM purchases_invoices p WHERE p.supplier_id = s.supplier_id) as last_invoice_date,
+      (SELECT COUNT(p.purchase_invoice_id) FROM purchases_invoices p WHERE p.supplier_id = s.supplier_id) as invoices_count
     FROM suppliers s
-    LEFT JOIN purchases_invoices p ON s.supplier_id = p.supplier_id
-    GROUP BY s.supplier_id
     ORDER BY s.supplier_id ASC
   `).all() as Supplier[];
 }
 
-export function saveSupplier(supplierData: { supplier_id?: number; supplier_name: string; contact_phone?: string }): Supplier {
+export function saveSupplier(supplierData: {
+  supplier_id?: number;
+  supplier_name: string;
+  contact_phone?: string;
+  tax_id?: string;
+  address?: string;
+  credit_limit?: number;
+  opening_balance?: number;
+}): Supplier {
   const database = getDatabaseInstance();
   const trimmedName = supplierData.supplier_name.trim();
   if (!trimmedName) throw new Error('اسم المورد مطلوب');
@@ -2049,21 +2141,38 @@ export function saveSupplier(supplierData: { supplier_id?: number; supplier_name
     if (supplierData.supplier_id) {
       database.prepare(`
         UPDATE suppliers 
-        SET supplier_name = ?, contact_phone = COALESCE(?, contact_phone)
+        SET supplier_name = ?,
+            contact_phone = COALESCE(?, contact_phone),
+            tax_id = COALESCE(?, tax_id),
+            address = COALESCE(?, address),
+            credit_limit = COALESCE(?, credit_limit),
+            opening_balance = COALESCE(?, opening_balance)
         WHERE supplier_id = ?
-      `).run(trimmedName, supplierData.contact_phone || '', supplierData.supplier_id);
-      return database.prepare('SELECT * FROM suppliers WHERE supplier_id = ?').get(supplierData.supplier_id) as Supplier;
+      `).run(
+        trimmedName,
+        supplierData.contact_phone ?? null,
+        supplierData.tax_id ?? null,
+        supplierData.address ?? null,
+        supplierData.credit_limit ?? null,
+        supplierData.opening_balance ?? null,
+        supplierData.supplier_id
+      );
+      return getSuppliers().find((s) => s.supplier_id === supplierData.supplier_id) as Supplier;
     } else {
       const maxId = (database.prepare('SELECT COALESCE(MAX(supplier_id), 0) as m FROM suppliers').get() as { m: number }).m + 1;
       database.prepare(`
-        INSERT INTO suppliers (supplier_id, supplier_name, contact_phone)
-        VALUES (?, ?, ?)
-      `).run(maxId, trimmedName, supplierData.contact_phone || '');
-      return {
-        supplier_id: maxId,
-        supplier_name: trimmedName,
-        contact_phone: supplierData.contact_phone || ''
-      };
+        INSERT INTO suppliers (supplier_id, supplier_name, contact_phone, tax_id, address, credit_limit, opening_balance)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        maxId,
+        trimmedName,
+        supplierData.contact_phone || '',
+        supplierData.tax_id || '',
+        supplierData.address || '',
+        Number(supplierData.credit_limit || 0),
+        Number(supplierData.opening_balance || 0)
+      );
+      return getSuppliers().find((s) => s.supplier_id === maxId) as Supplier;
     }
   });
 
@@ -2277,7 +2386,7 @@ export function getTreasuryOverview(): TreasuryOverview {
   const supplierPaymentsOutflow = (database.prepare(`
     SELECT COALESCE(SUM(debit), 0) as total 
     FROM general_ledger_2026 
-    WHERE entry_date = ? AND (account_name LIKE '%خصوم.متداولة.موردين%' OR account_name LIKE '%خصوم.موردين%') AND document_ref LIKE 'PAY-SUP%'
+    WHERE entry_date = ? AND (account_name LIKE '%خصوم.متداولة.موردين%' OR account_name LIKE '%خصوم.موردين%') AND (document_ref LIKE 'PAY-SUP%' OR document_ref LIKE 'SUP-PAY-%')
   `).get(today) as { total: number }).total;
 
   const todayOutflow = Math.round((purchasesOutflow + expensesOutflow + withdrawalsOutflow + supplierPaymentsOutflow) * 100) / 100;
@@ -3488,6 +3597,530 @@ export function getLoginAuditLogs(limit: number = 100): LoginAuditEntry[] {
     LIMIT ?
   `).all(limit) as LoginAuditEntry[];
 }
+
+// ============================================================================
+// MODULE 2: SUPPLIERS STATEMENT, PAYMENTS & PURCHASE / EXPIRY RETURNS
+// ============================================================================
+
+function roundMoney(val: number): number {
+  return Math.round((Number(val) || 0) * 100) / 100;
+}
+
+interface GlPostingLine {
+  account_name: string;
+  notes: string;
+  debit: number;
+  credit: number;
+}
+
+/**
+ * Shared atomic GL poster enforcing double-entry equality (sum(debit) == sum(credit)).
+ */
+function postBalancedGlLines(
+  database: Database.Database,
+  entryDate: string,
+  documentRef: string,
+  lines: GlPostingLine[]
+): number {
+  const activeLines = lines.filter((l) => roundMoney(l.debit) > 0 || roundMoney(l.credit) > 0);
+  if (activeLines.length === 0) return 0;
+
+  const totalDebit = roundMoney(activeLines.reduce((acc, l) => acc + roundMoney(l.debit), 0));
+  const totalCredit = roundMoney(activeLines.reduce((acc, l) => acc + roundMoney(l.credit), 0));
+  if (Math.abs(totalDebit - totalCredit) > 0.01) {
+    throw new Error(`Unbalanced GL posting for ${documentRef}: Debit=${totalDebit} Credit=${totalCredit}`);
+  }
+
+  let nextEntryId = (
+    database.prepare('SELECT COALESCE(MAX(entry_id), 0) as m FROM general_ledger_2026').get() as { m: number }
+  ).m;
+
+  const stmt = database.prepare(`
+    INSERT INTO general_ledger_2026 (entry_id, entry_date, account_name, document_ref, notes, amount, debit, credit)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  for (const line of activeLines) {
+    nextEntryId++;
+    const debit = roundMoney(line.debit);
+    const credit = roundMoney(line.credit);
+    const signedAmount = roundMoney(debit - credit);
+    stmt.run(nextEntryId, entryDate, line.account_name, documentRef, line.notes, signedAmount, debit, credit);
+  }
+
+  return nextEntryId;
+}
+
+/**
+ * Unified suppliers GL balance covering both legacy 'خصوم.متداولة.موردين.الكل' and modern 'خصوم.متداولة.موردين'.
+ */
+export function getTotalSuppliersGlPayable(database?: Database.Database): number {
+  const d = database || getDatabaseInstance();
+  const row = d.prepare(`
+    SELECT COALESCE(ROUND(SUM(credit - debit), 2), 0) as bal
+    FROM general_ledger_2026
+    WHERE account_name LIKE 'خصوم.متداولة.موردين%'
+  `).get() as { bal: number };
+  return roundMoney(row?.bal ?? 0);
+}
+
+/**
+ * Detailed chronological statement for a supplier with running balance & unified GL payable.
+ */
+export function getSupplierStatement(
+  supplierId: number,
+  fromDate?: string,
+  toDate?: string
+): SupplierStatementReport {
+  const database = getDatabaseInstance();
+  const supplier = getSuppliers().find((s) => s.supplier_id === supplierId);
+  if (!supplier) {
+    throw new Error(`المورد رقم #${supplierId} غير موجود.`);
+  }
+
+  const openingBalance = roundMoney(supplier.opening_balance ?? 0);
+  const rawEntries: Array<Omit<SupplierStatementEntry, 'running_balance'> & { sortKey: string }> = [];
+
+  if (openingBalance !== 0) {
+    rawEntries.push({
+      entry_key: 'OPENING',
+      date: '0000-00-00',
+      sortKey: '0000-00-00-0',
+      type: 'OPENING',
+      label: 'رصيد أول المدة',
+      reference: `SUP-${supplierId}`,
+      credit_effect: openingBalance > 0 ? openingBalance : 0,
+      debit_effect: openingBalance < 0 ? Math.abs(openingBalance) : 0,
+      notes: 'رصيد مرحل'
+    });
+  }
+
+  const purchases = database.prepare(`
+    SELECT purchase_invoice_id, invoice_date, total_amount, paper_invoice_number, payment_method, notes
+    FROM purchases_invoices
+    WHERE supplier_id = ?
+    ORDER BY invoice_date ASC, purchase_invoice_id ASC
+  `).all(supplierId) as Array<{
+    purchase_invoice_id: number;
+    invoice_date: string;
+    total_amount: number;
+    paper_invoice_number?: string;
+    payment_method?: string;
+    notes?: string;
+  }>;
+
+  let totalPurchasesCredit = 0;
+  let totalPurchasesCash = 0;
+
+  for (const inv of purchases) {
+    const isCash = inv.payment_method === 'نقدي' || inv.payment_method === 'CASH';
+    const amt = roundMoney(inv.total_amount);
+    if (isCash) {
+      totalPurchasesCash = roundMoney(totalPurchasesCash + amt);
+    } else {
+      totalPurchasesCredit = roundMoney(totalPurchasesCredit + amt);
+    }
+
+    rawEntries.push({
+      entry_key: `PUR-${inv.purchase_invoice_id}`,
+      date: inv.invoice_date || '',
+      sortKey: `${inv.invoice_date || '1900-01-01'}-1-${String(inv.purchase_invoice_id).padStart(8, '0')}`,
+      type: isCash ? 'PURCHASE_CASH' : 'PURCHASE_CREDIT',
+      label: isCash ? 'فاتورة مشتريات نقدية' : 'فاتورة مشتريات آجل',
+      reference: inv.paper_invoice_number ? `#${inv.purchase_invoice_id} (${inv.paper_invoice_number})` : `#${inv.purchase_invoice_id}`,
+      credit_effect: isCash ? 0 : amt,
+      debit_effect: 0,
+      notes: isCash ? `مدفوعة نقداً (${amt.toFixed(2)} ج.م)${inv.notes ? ` - ${inv.notes}` : ''}` : (inv.notes || '')
+    });
+  }
+
+  const payments = database.prepare(`
+    SELECT id, transaction_date, amount, notes
+    FROM supplier_transactions
+    WHERE supplier_id = ?
+      AND transaction_type IN ('سداد دفعة مورد', 'سداد دفعة نقدية')
+    ORDER BY transaction_date ASC, id ASC
+  `).all(supplierId) as Array<{
+    id: number;
+    transaction_date: string;
+    amount: number;
+    notes?: string;
+  }>;
+
+  let totalPayments = 0;
+  for (const p of payments) {
+    const amt = roundMoney(Math.abs(p.amount));
+    totalPayments = roundMoney(totalPayments + amt);
+    const dateOnly = (p.transaction_date || '').slice(0, 10);
+    rawEntries.push({
+      entry_key: `PAY-${p.id}`,
+      date: p.transaction_date || '',
+      sortKey: `${dateOnly || '1900-01-01'}-2-${String(p.id).padStart(8, '0')}`,
+      type: 'PAYMENT',
+      label: 'سداد دفعة للمورد',
+      reference: `SUP-PAY-${p.id}`,
+      debit_effect: amt,
+      credit_effect: 0,
+      notes: p.notes || ''
+    });
+  }
+
+  const returns = database.prepare(`
+    SELECT return_id, return_type, settlement_mode, total_cost_value, credit_amount, expiry_loss_amount, return_date, notes
+    FROM purchase_returns
+    WHERE supplier_id = ?
+    ORDER BY return_date ASC, return_id ASC
+  `).all(supplierId) as PurchaseReturnRecord[];
+
+  let totalReturnsCredit = 0;
+  for (const ret of returns) {
+    const creditAmt = ret.settlement_mode === 'SUPPLIER_CREDIT' ? roundMoney(ret.credit_amount) : 0;
+    totalReturnsCredit = roundMoney(totalReturnsCredit + creditAmt);
+    const dateOnly = (ret.return_date || '').slice(0, 10);
+    rawEntries.push({
+      entry_key: `RET-${ret.return_id}`,
+      date: ret.return_date || '',
+      sortKey: `${dateOnly || '1900-01-01'}-3-${String(ret.return_id).padStart(8, '0')}`,
+      type: ret.return_type,
+      label: ret.return_type === 'EXPIRY_RETURN' ? 'مرتجع إكسباير للمورد' : 'مرتجع مشتريات للمورد',
+      reference: `PUR-RET-${ret.return_id}`,
+      debit_effect: creditAmt,
+      credit_effect: 0,
+      notes: ret.settlement_mode === 'CASH_REFUND'
+        ? `استرداد نقدي للخزينة (${roundMoney(ret.credit_amount).toFixed(2)} ج.م)`
+        : (ret.expiry_loss_amount > 0 ? `تعويض ${roundMoney(ret.credit_amount).toFixed(2)} / هوالك ${roundMoney(ret.expiry_loss_amount).toFixed(2)}` : (ret.notes || ''))
+    });
+  }
+
+  rawEntries.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  let running = 0;
+  const fullEntries: SupplierStatementEntry[] = rawEntries.map(({ sortKey: _s, ...rest }) => {
+    running = roundMoney(running + rest.credit_effect - rest.debit_effect);
+    return {
+      ...rest,
+      running_balance: running
+    };
+  });
+
+  const filteredEntries = fullEntries.filter((e) => {
+    const d = e.date.slice(0, 10);
+    if (e.type === 'OPENING') return true;
+    if (fromDate && d && d < fromDate) return false;
+    if (toDate && d && d > toDate) return false;
+    return true;
+  });
+
+  return {
+    supplier,
+    opening_balance: openingBalance,
+    total_purchases_credit: totalPurchasesCredit,
+    total_purchases_cash: totalPurchasesCash,
+    total_payments: totalPayments,
+    total_returns_credit: totalReturnsCredit,
+    closing_balance: running,
+    total_gl_suppliers_payable: getTotalSuppliersGlPayable(database),
+    entries: filteredEntries
+  };
+}
+
+/**
+ * Record cash payment to a supplier with balanced GL and treasury deduction.
+ */
+export function recordSupplierPayment(payload: RecordSupplierPaymentPayload): {
+  success: boolean;
+  tx_id: number;
+  supplier_id: number;
+  supplier_name: string;
+  amount: number;
+  new_treasury_balance: number;
+} {
+  const database = getDatabaseInstance();
+  const amount = roundMoney(payload.amount);
+  if (!payload.supplier_id || payload.supplier_id <= 0) {
+    throw new Error('يرجى تحديد المورد.');
+  }
+  if (!amount || amount <= 0) {
+    throw new Error('مبلغ السداد يجب أن يكون أكبر من الصفر.');
+  }
+
+  const tx = database.transaction(() => {
+    const supplier = database
+      .prepare('SELECT supplier_id, supplier_name FROM suppliers WHERE supplier_id = ?')
+      .get(payload.supplier_id) as { supplier_id: number; supplier_name: string } | undefined;
+    if (!supplier) {
+      throw new Error(`المورد رقم #${payload.supplier_id} غير موجود.`);
+    }
+
+    const treasury = database
+      .prepare('SELECT cash_balance FROM treasury_state WHERE id = 1')
+      .get() as { cash_balance: number } | undefined;
+    const currentCash = roundMoney(treasury?.cash_balance ?? 0);
+    if (currentCash < amount) {
+      throw new Error(
+        `نقدية الخزينة (${currentCash.toFixed(2)} ج.م) غير كافية لسداد ${amount.toFixed(2)} ج.م.`
+      );
+    }
+
+    const { date, timestamp } = getLocalDateTime();
+    const newCash = roundMoney(currentCash - amount);
+
+    database.prepare(`
+      UPDATE treasury_state SET cash_balance = ?, last_updated = ? WHERE id = 1
+    `).run(newCash, timestamp);
+
+    const maxTxId = (
+      database.prepare('SELECT COALESCE(MAX(id), 0) as m FROM supplier_transactions').get() as { m: number }
+    ).m + 1;
+
+    const cleanNotes = (payload.notes || '').trim() || `سداد دفعة للمورد (${payload.cashier_name || 'المدير'})`;
+
+    database.prepare(`
+      INSERT INTO supplier_transactions (id, supplier_id, supplier_name, transaction_type, amount, transaction_date, invoice_id, notes)
+      VALUES (?, ?, ?, 'سداد دفعة مورد', ?, ?, 0, ?)
+    `).run(maxTxId, supplier.supplier_id, supplier.supplier_name, -amount, timestamp, cleanNotes);
+
+    postBalancedGlLines(database, date, `SUP-PAY-${maxTxId}`, [
+      {
+        account_name: 'خصوم.متداولة.موردين',
+        notes: `سداد دفعة للمورد: ${supplier.supplier_name}${payload.notes ? ` - ${payload.notes}` : ''}`,
+        debit: amount,
+        credit: 0
+      },
+      {
+        account_name: 'اصول.متداولة.نقدية.كاش',
+        notes: `صرف نقدي لسداد المورد: ${supplier.supplier_name}`,
+        debit: 0,
+        credit: amount
+      }
+    ]);
+
+    return {
+      success: true,
+      tx_id: maxTxId,
+      supplier_id: supplier.supplier_id,
+      supplier_name: supplier.supplier_name,
+      amount,
+      new_treasury_balance: newCash
+    };
+  });
+
+  return tx();
+}
+
+/**
+ * Create Purchase Return or Expiry Return to a supplier with balanced GL split.
+ */
+export function createPurchaseReturn(payload: CreatePurchaseReturnPayload): PurchaseReturnRecord {
+  const database = getDatabaseInstance();
+
+  if (!payload.supplier_id || payload.supplier_id <= 0) {
+    throw new Error('يرجى تحديد المورد.');
+  }
+  if (!payload.items || payload.items.length === 0) {
+    throw new Error('يجب إضافة صنف واحد على الأقل لمرتجع المشتريات.');
+  }
+
+  const rawComp = payload.compensation_pct !== undefined && payload.compensation_pct !== null
+    ? Number(payload.compensation_pct)
+    : 100;
+  const compPct = Math.min(100, Math.max(0, rawComp));
+
+  const tx = database.transaction(() => {
+    const supplier = database
+      .prepare('SELECT supplier_id, supplier_name FROM suppliers WHERE supplier_id = ?')
+      .get(payload.supplier_id) as { supplier_id: number; supplier_name: string } | undefined;
+    if (!supplier) {
+      throw new Error(`المورد رقم #${payload.supplier_id} غير موجود.`);
+    }
+
+    const { date, timestamp } = getLocalDateTime();
+    let totalCostValue = 0;
+
+    const preparedLines = payload.items.map((line) => {
+      const qty = Number(line.quantity);
+      const cost = roundMoney(line.unit_cost);
+      if (!line.item_id || line.item_id <= 0) {
+        throw new Error('معرف الصنف غير صالح.');
+      }
+      if (!qty || qty <= 0 || isNaN(qty)) {
+        throw new Error(`الكمية المرتجعة للصنف "${line.item_name}" يجب أن تكون أكبر من الصفر.`);
+      }
+      if (cost < 0 || isNaN(cost)) {
+        throw new Error(`تكلفة الصنف "${line.item_name}" غير صالحة.`);
+      }
+
+      const dbItem = database
+        .prepare('SELECT item_id, item_name_en, current_stock, expiry_date FROM items WHERE item_id = ?')
+        .get(line.item_id) as {
+          item_id: number;
+          item_name_en: string;
+          current_stock: number;
+          expiry_date?: string;
+        } | undefined;
+      if (!dbItem) {
+        throw new Error(`الصنف رقم #${line.item_id} غير موجود.`);
+      }
+      if (Number(dbItem.current_stock || 0) + 0.0001 < qty) {
+        throw new Error(
+          `رصيد المخزن للصنف "${dbItem.item_name_en}" (${dbItem.current_stock}) غير كافٍ لإرجاع ${qty}.`
+        );
+      }
+
+      const lineTotal = roundMoney(qty * cost);
+      totalCostValue = roundMoney(totalCostValue + lineTotal);
+
+      return {
+        item_id: line.item_id,
+        item_name: line.item_name || dbItem.item_name_en,
+        quantity: qty,
+        unit_cost: cost,
+        line_total: lineTotal,
+        expiry_date: line.expiry_date || dbItem.expiry_date || ''
+      };
+    });
+
+    const creditAmount = roundMoney(totalCostValue * (compPct / 100));
+    const expiryLossAmount = roundMoney(totalCostValue - creditAmount);
+    const cashierId = payload.user_id && payload.user_id > 0 ? payload.user_id : 99;
+    const cashierName = (payload.cashier_name || '').trim() || 'د. مريم الحميلي';
+
+    const retInsert = database.prepare(`
+      INSERT INTO purchase_returns (
+        supplier_id, supplier_name, original_purchase_id, return_type, settlement_mode,
+        total_cost_value, credit_amount, expiry_loss_amount, user_id, cashier_name, notes, return_date
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      supplier.supplier_id,
+      supplier.supplier_name,
+      payload.original_purchase_id || 0,
+      payload.return_type,
+      payload.settlement_mode,
+      totalCostValue,
+      creditAmount,
+      expiryLossAmount,
+      cashierId,
+      cashierName,
+      (payload.notes || '').trim(),
+      timestamp
+    );
+
+    const returnId = Number(retInsert.lastInsertRowid);
+
+    const insertLineStmt = database.prepare(`
+      INSERT INTO purchase_return_items (return_id, item_id, item_name, quantity, unit_cost, line_total, expiry_date)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const deductStockStmt = database.prepare(`
+      UPDATE items SET current_stock = ROUND(current_stock - ?, 4) WHERE item_id = ?
+    `);
+
+    for (const line of preparedLines) {
+      insertLineStmt.run(
+        returnId,
+        line.item_id,
+        line.item_name,
+        line.quantity,
+        line.unit_cost,
+        line.line_total,
+        line.expiry_date
+      );
+      deductStockStmt.run(line.quantity, line.item_id);
+    }
+
+    if (payload.settlement_mode === 'CASH_REFUND' && creditAmount > 0) {
+      database.prepare(`
+        UPDATE treasury_state SET cash_balance = ROUND(cash_balance + ?, 2), last_updated = ? WHERE id = 1
+      `).run(creditAmount, timestamp);
+    }
+
+    const maxTxId = (
+      database.prepare('SELECT COALESCE(MAX(id), 0) as m FROM supplier_transactions').get() as { m: number }
+    ).m + 1;
+    const txType = payload.return_type === 'EXPIRY_RETURN' ? 'مرتجع اكسباير' : 'مرتجع مشتريات';
+    database.prepare(`
+      INSERT INTO supplier_transactions (id, supplier_id, supplier_name, transaction_type, amount, transaction_date, invoice_id, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      maxTxId,
+      supplier.supplier_id,
+      supplier.supplier_name,
+      txType,
+      payload.settlement_mode === 'SUPPLIER_CREDIT' ? -creditAmount : 0,
+      timestamp,
+      returnId,
+      payload.notes || `${txType} (${compPct}%)`
+    );
+
+    const glLines: GlPostingLine[] = [
+      {
+        account_name: 'اصول.متداولة.مخزون',
+        notes: `${txType} #${returnId} - ${supplier.supplier_name}`,
+        debit: 0,
+        credit: totalCostValue
+      }
+    ];
+
+    if (creditAmount > 0) {
+      glLines.push({
+        account_name: payload.settlement_mode === 'CASH_REFUND'
+          ? 'اصول.متداولة.نقدية.كاش'
+          : 'خصوم.متداولة.موردين',
+        notes: payload.settlement_mode === 'CASH_REFUND'
+          ? `استرداد نقدي عن ${txType} #${returnId} - ${supplier.supplier_name}`
+          : `خصم حساب المورد عن ${txType} #${returnId} - ${supplier.supplier_name}`,
+        debit: creditAmount,
+        credit: 0
+      });
+    }
+
+    if (expiryLossAmount > 0) {
+      glLines.push({
+        account_name: 'مصروفات.تشغيلية.هوالك واكسباير',
+        notes: `فارق تعويض إكسباير غير مسترد عن #${returnId} - ${supplier.supplier_name}`,
+        debit: expiryLossAmount,
+        credit: 0
+      });
+    }
+
+    postBalancedGlLines(database, date, `PUR-RET-${returnId}`, glLines);
+
+    return {
+      return_id: returnId,
+      supplier_id: supplier.supplier_id,
+      supplier_name: supplier.supplier_name,
+      original_purchase_id: payload.original_purchase_id || 0,
+      return_type: payload.return_type,
+      settlement_mode: payload.settlement_mode,
+      total_cost_value: totalCostValue,
+      credit_amount: creditAmount,
+      expiry_loss_amount: expiryLossAmount,
+      user_id: cashierId,
+      cashier_name: cashierName,
+      notes: (payload.notes || '').trim(),
+      return_date: timestamp,
+      items_count: preparedLines.length
+    };
+  });
+
+  return tx();
+}
+
+export function getPurchaseReturns(supplierId?: number, limit: number = 50): PurchaseReturnRecord[] {
+  const database = getDatabaseInstance();
+  const whereClause = supplierId && supplierId > 0 ? 'WHERE pr.supplier_id = ?' : '';
+  const params: (number | string)[] = supplierId && supplierId > 0 ? [supplierId, limit] : [limit];
+
+  return database.prepare(`
+    SELECT pr.*,
+      (SELECT COUNT(*) FROM purchase_return_items pri WHERE pri.return_id = pr.return_id) as items_count
+    FROM purchase_returns pr
+    ${whereClause}
+    ORDER BY pr.return_id DESC
+    LIMIT ?
+  `).all(...params) as PurchaseReturnRecord[];
+}
+
 
 
 

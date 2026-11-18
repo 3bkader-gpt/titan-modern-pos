@@ -4,8 +4,11 @@ import {
   PurchaseInvoice, 
   PurchaseInvoiceItem, 
   Item, 
-  CreatePurchaseInvoicePayload 
+  CreatePurchaseInvoicePayload,
+  AuthSession
 } from '../../../shared/types';
+import { SupplierStatementTab } from '../components/purchases/SupplierStatementTab';
+import { PurchaseReturnTab } from '../components/purchases/PurchaseReturnTab';
 import { 
   Truck, 
   Plus, 
@@ -26,10 +29,13 @@ import {
   Sparkles,
   HelpCircle,
   Save,
-  Check
+  Check,
+  RotateCcw,
+  Wallet
 } from 'lucide-react';
 
 interface PurchasesViewProps {
+  currentUser?: AuthSession | null;
   initialDraftItems?: Array<{
     item_id: number;
     item_name_en: string;
@@ -58,11 +64,13 @@ interface PurchaseDraftLine {
 }
 
 export const PurchasesView: React.FC<PurchasesViewProps> = ({
+  currentUser,
   initialDraftItems,
   onClearInitialDraft
 }) => {
   // Navigation Tabs inside Purchases view
-  const [activeTab, setActiveTab] = useState<'new_invoice' | 'history' | 'suppliers'>('new_invoice');
+  const [activeTab, setActiveTab] = useState<'new_invoice' | 'statement' | 'returns' | 'history' | 'suppliers'>('new_invoice');
+  const [statementSupplierId, setStatementSupplierId] = useState<number | ''>('');
 
   // Suppliers state
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -107,6 +115,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     type: 'success' | 'error';
   } | null>(null);
   const [submittingInvoice, setSubmittingInvoice] = useState<boolean>(false);
+
+  const notifyStatus = useCallback((text: string, type: 'success' | 'error') => {
+    setStatusMessage({ text, type });
+  }, []);
 
   // 1. Fetch Suppliers
   const loadSuppliers = useCallback(async () => {
@@ -397,7 +409,8 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       if (window.electronAPI) {
         const saved = await window.electronAPI.saveSupplier({
           supplier_name: newSupplierName.trim(),
-          contact_phone: newSupplierPhone.trim() || undefined
+          contact_phone: newSupplierPhone.trim() || undefined,
+          address: newSupplierAddress.trim() || undefined
         });
 
         await loadSuppliers();
@@ -444,10 +457,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
           </div>
 
           {/* Sub-Tabs */}
-          <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-lg border border-slate-200 text-xs">
+          <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100 rounded-lg border border-slate-200 text-xs">
             <button
               onClick={() => setActiveTab('new_invoice')}
-              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'new_invoice'
                   ? 'bg-white text-blue-700 shadow-2xs'
                   : 'text-slate-600 hover:text-slate-900'
@@ -458,20 +471,44 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
             </button>
 
             <button
+              onClick={() => setActiveTab('statement')}
+              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'statement'
+                  ? 'bg-white text-emerald-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Wallet className="w-3.5 h-3.5" />
+              <span>كشف حساب وسداد المورد</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('returns')}
+              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'returns'
+                  ? 'bg-white text-amber-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>مرتجع مشتريات / إكسباير</span>
+            </button>
+
+            <button
               onClick={() => setActiveTab('history')}
-              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'history'
                   ? 'bg-white text-blue-700 shadow-2xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               <FileText className="w-3.5 h-3.5" />
-              <span>سجل الفواتير (311+)</span>
+              <span>سجل الفواتير</span>
             </button>
 
             <button
               onClick={() => setActiveTab('suppliers')}
-              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-md font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
                 activeTab === 'suppliers'
                   ? 'bg-white text-blue-700 shadow-2xs'
                   : 'text-slate-600 hover:text-slate-900'
@@ -926,6 +963,31 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       )}
 
       {/* ======================================================== */}
+      {/* TAB 2A: SUPPLIER STATEMENT & PAYMENTS                    */}
+      {/* ======================================================== */}
+      {activeTab === 'statement' && (
+        <SupplierStatementTab
+          suppliers={suppliers}
+          initialSupplierId={statementSupplierId || selectedSupplierId}
+          currentUser={currentUser}
+          onRefreshSuppliers={() => { void loadSuppliers(); }}
+          onNotify={notifyStatus}
+        />
+      )}
+
+      {/* ======================================================== */}
+      {/* TAB 2B: PURCHASE & EXPIRY RETURNS                        */}
+      {/* ======================================================== */}
+      {activeTab === 'returns' && (
+        <PurchaseReturnTab
+          suppliers={suppliers}
+          currentUser={currentUser}
+          onRefreshSuppliers={() => { void loadSuppliers(); }}
+          onNotify={notifyStatus}
+        />
+      )}
+
+      {/* ======================================================== */}
       {/* TAB 2: INVOICES HISTORY                                   */}
       {/* ======================================================== */}
       {activeTab === 'history' && (
@@ -1063,11 +1125,28 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                   )}
                 </div>
 
-                <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
-                  <span className="text-slate-500">الفواتير المسجلة:</span>
-                  <span className="font-mono font-bold text-slate-800">
-                    {s.invoices_count || 0} فاتورة
-                  </span>
+                <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs gap-2">
+                  <div>
+                    <span className="text-slate-500 block text-[10px]">الرصيد المستحق</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {(s.current_balance ?? 0).toFixed(2)} ج.م
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-mono text-slate-500">
+                      {s.invoices_count || 0} فاتورة
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStatementSupplierId(s.supplier_id);
+                        setActiveTab('statement');
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-[11px] font-bold cursor-pointer"
+                    >
+                      كشف وسداد
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}

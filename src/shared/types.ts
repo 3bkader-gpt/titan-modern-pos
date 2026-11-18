@@ -227,9 +227,85 @@ export interface Supplier {
   supplier_id: number;
   supplier_name: string;
   contact_phone?: string | null;
+  tax_id?: string | null;
+  address?: string | null;
+  credit_limit?: number;
+  opening_balance?: number;
   total_purchases?: number;
+  total_paid?: number;
+  total_returns?: number;
+  current_balance?: number;
   last_invoice_date?: string | null;
   invoices_count?: number;
+}
+
+export interface SupplierStatementEntry {
+  entry_key: string;
+  date: string;
+  type: 'OPENING' | 'PURCHASE_CREDIT' | 'PURCHASE_CASH' | 'PAYMENT' | 'PURCHASE_RETURN' | 'EXPIRY_RETURN';
+  label: string;
+  reference: string;
+  debit_effect: number; // reduces payable (payments, supplier-credit returns)
+  credit_effect: number; // increases payable (credit purchases, opening balance)
+  running_balance: number;
+  notes?: string;
+}
+
+export interface SupplierStatementReport {
+  supplier: Supplier;
+  opening_balance: number;
+  total_purchases_credit: number;
+  total_purchases_cash: number;
+  total_payments: number;
+  total_returns_credit: number;
+  closing_balance: number;
+  total_gl_suppliers_payable: number;
+  entries: SupplierStatementEntry[];
+}
+
+export interface RecordSupplierPaymentPayload {
+  supplier_id: number;
+  amount: number;
+  notes?: string;
+  user_id?: number;
+  cashier_name?: string;
+}
+
+export interface CreatePurchaseReturnItemPayload {
+  item_id: number;
+  item_name: string;
+  quantity: number;
+  unit_cost: number;
+  expiry_date?: string;
+}
+
+export interface CreatePurchaseReturnPayload {
+  supplier_id: number;
+  original_purchase_id?: number;
+  return_type: 'PURCHASE_RETURN' | 'EXPIRY_RETURN';
+  settlement_mode: 'SUPPLIER_CREDIT' | 'CASH_REFUND';
+  compensation_pct?: number; // 0..100 (default 100)
+  items: CreatePurchaseReturnItemPayload[];
+  user_id?: number;
+  cashier_name?: string;
+  notes?: string;
+}
+
+export interface PurchaseReturnRecord {
+  return_id: number;
+  supplier_id: number;
+  supplier_name: string;
+  original_purchase_id: number;
+  return_type: 'PURCHASE_RETURN' | 'EXPIRY_RETURN';
+  settlement_mode: 'SUPPLIER_CREDIT' | 'CASH_REFUND';
+  total_cost_value: number;
+  credit_amount: number;
+  expiry_loss_amount: number;
+  user_id: number;
+  cashier_name: string;
+  notes: string;
+  return_date: string;
+  items_count?: number;
 }
 
 export interface PurchaseInvoice {

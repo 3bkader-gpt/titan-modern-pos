@@ -36,7 +36,11 @@ import {
   ChangeDataDirResult,
   AuthSession,
   LoginAuditEntry,
-  SaveUserPayload
+  SaveUserPayload,
+  SupplierStatementReport,
+  RecordSupplierPaymentPayload,
+  CreatePurchaseReturnPayload,
+  PurchaseReturnRecord
 } from '../shared/types';
 
 export const electronAPI = {
@@ -96,7 +100,15 @@ export const electronAPI = {
   getSuppliers: (): Promise<Supplier[]> =>
     ipcRenderer.invoke('purchase:getSuppliers'),
 
-  saveSupplier: (supplierData: { supplier_id?: number; supplier_name: string; contact_phone?: string }): Promise<Supplier> =>
+  saveSupplier: (supplierData: {
+    supplier_id?: number;
+    supplier_name: string;
+    contact_phone?: string;
+    tax_id?: string;
+    address?: string;
+    credit_limit?: number;
+    opening_balance?: number;
+  }): Promise<Supplier> =>
     ipcRenderer.invoke('purchase:saveSupplier', supplierData),
 
   getPurchaseInvoices: (limit?: number): Promise<PurchaseInvoice[]> =>
@@ -104,6 +116,25 @@ export const electronAPI = {
 
   getPurchaseInvoiceItems: (invoiceId: number): Promise<PurchaseInvoiceItem[]> =>
     ipcRenderer.invoke('purchase:getInvoiceItems', invoiceId),
+
+  getSupplierStatement: (supplierId: number, fromDate?: string, toDate?: string): Promise<SupplierStatementReport> =>
+    ipcRenderer.invoke('purchase:getSupplierStatement', supplierId, fromDate, toDate),
+
+  recordSupplierPayment: (payload: RecordSupplierPaymentPayload): Promise<{
+    success: boolean;
+    tx_id: number;
+    supplier_id: number;
+    supplier_name: string;
+    amount: number;
+    new_treasury_balance: number;
+  }> =>
+    ipcRenderer.invoke('purchase:recordSupplierPayment', payload),
+
+  createPurchaseReturn: (payload: CreatePurchaseReturnPayload): Promise<PurchaseReturnRecord> =>
+    ipcRenderer.invoke('purchase:createPurchaseReturn', payload),
+
+  getPurchaseReturns: (supplierId?: number, limit?: number): Promise<PurchaseReturnRecord[]> =>
+    ipcRenderer.invoke('purchase:getPurchaseReturns', supplierId, limit),
 
   // Phase 3 Shortages APIs
   getShortages: (supplierFilter?: number, searchQuery?: string): Promise<ShortageItem[]> =>

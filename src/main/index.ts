@@ -24,6 +24,10 @@ import {
   saveSupplier,
   getPurchaseInvoices,
   getPurchaseInvoiceItems,
+  getSupplierStatement,
+  recordSupplierPayment,
+  createPurchaseReturn,
+  getPurchaseReturns,
   getShortages,
   addOrUpdateShortage,
   removeShortage,
@@ -69,7 +73,9 @@ import {
   SaveItemPayload,
   CreatePurchaseInvoicePayload,
   RecordTreasuryTransactionPayload,
-  SaveUserPayload
+  SaveUserPayload,
+  RecordSupplierPaymentPayload,
+  CreatePurchaseReturnPayload
 } from '../shared/types';
 
 import fs from 'fs';
@@ -198,7 +204,15 @@ function registerIpcHandlers() {
     return getSuppliers();
   });
 
-  ipcMain.handle('purchase:saveSupplier', async (_event, supplierData: { supplier_id?: number; supplier_name: string; contact_phone?: string }) => {
+  ipcMain.handle('purchase:saveSupplier', async (_event, supplierData: {
+    supplier_id?: number;
+    supplier_name: string;
+    contact_phone?: string;
+    tax_id?: string;
+    address?: string;
+    credit_limit?: number;
+    opening_balance?: number;
+  }) => {
     return saveSupplier(supplierData);
   });
 
@@ -208,6 +222,22 @@ function registerIpcHandlers() {
 
   ipcMain.handle('purchase:getInvoiceItems', async (_event, invoiceId: number) => {
     return getPurchaseInvoiceItems(invoiceId);
+  });
+
+  ipcMain.handle('purchase:getSupplierStatement', async (_event, supplierId: number, fromDate?: string, toDate?: string) => {
+    return getSupplierStatement(supplierId, fromDate, toDate);
+  });
+
+  ipcMain.handle('purchase:recordSupplierPayment', async (_event, payload: RecordSupplierPaymentPayload) => {
+    return recordSupplierPayment(payload);
+  });
+
+  ipcMain.handle('purchase:createPurchaseReturn', async (_event, payload: CreatePurchaseReturnPayload) => {
+    return createPurchaseReturn(payload);
+  });
+
+  ipcMain.handle('purchase:getPurchaseReturns', async (_event, supplierId?: number, limit?: number) => {
+    return getPurchaseReturns(supplierId, limit);
   });
 
   // Phase 3 Shortages Handlers

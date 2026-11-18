@@ -308,6 +308,7 @@ export const App: React.FC = () => {
 
               {activeTab === 'purchases' && canAccessTab('purchases', currentUser) && (
                 <PurchasesView
+                  currentUser={currentUser}
                   initialDraftItems={pendingPurchaseDraft || undefined}
                   onClearInitialDraft={() => setPendingPurchaseDraft(null)}
                 />
