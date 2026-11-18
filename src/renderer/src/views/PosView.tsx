@@ -1,5 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Item, CreateSaleItemPayload, CreateSaleInvoicePayload, CreateSaleInvoiceResult, ReturnSaleInvoiceResult, AuthSession } from '../../../shared/types';
+import {
+  Item,
+  CreateSaleItemPayload,
+  CreateSaleInvoicePayload,
+  CreateSaleInvoiceResult,
+  ReturnSaleInvoiceResult,
+  AuthSession,
+  EditableSaleInvoiceData,
+  UpdateSaleInvoicePayload
+} from '../../../shared/types';
 import { PosSearchInput } from '../components/pos/PosSearchInput';
 import { PosCartTable } from '../components/pos/PosCartTable';
 import { PosCheckoutPanel } from '../components/pos/PosCheckoutPanel';
@@ -7,7 +16,7 @@ import { ThermalReceiptModal } from '../components/pos/ThermalReceiptModal';
 import { QuickReturnModal } from '../components/pos/QuickReturnModal';
 import { DrugEyeSubstituteModal } from '../components/pos/DrugEyeSubstituteModal';
 import { playBeepSuccess, playCheckoutChime, playWarningTone } from '../components/pos/soundEffects';
-import { Plus, X, ShoppingBag, Receipt, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Plus, X, ShoppingBag, Receipt, AlertCircle, CheckCircle2, Pencil } from 'lucide-react';
 
 interface CartItem extends CreateSaleItemPayload {
   current_stock: number;
@@ -26,15 +35,23 @@ interface ActiveCartTab {
   clientName: string;
   clientPhone: string;
   clientAddress: string;
+  editingInvoiceNumber?: number;
+  editingOverridePin?: string;
 }
 
 const MAX_TABS = 5;
 
 interface PosViewProps {
   currentUser?: AuthSession | null;
+  pendingEditInvoice?: { data: EditableSaleInvoiceData; overridePin?: string } | null;
+  onClearPendingEditInvoice?: () => void;
 }
 
-export const PosView: React.FC<PosViewProps> = ({ currentUser }) => {
+export const PosView: React.FC<PosViewProps> = ({
+  currentUser,
+  pendingEditInvoice,
+  onClearPendingEditInvoice
+}) => {
   // 1. Multi-Tab Carts State
   const [tabs, setTabs] = useState<ActiveCartTab[]>([
     {
@@ -76,6 +93,50 @@ export const PosView: React.FC<PosViewProps> = ({ currentUser }) => {
 
   // Current active cart reference
   const currentTab = tabs.find(t => t.id === activeTabId) || tabs[0];
+
+  useEffect(() => {
+    if (!pendingEditInvoice) return;
+    const { data, overridePin } = pendingEditInvoice;
+    const inv = data.invoice;
+    const allowedMethods = ['نقدي', 'فيزا', 'محفظة / إنستاباي', 'آجل', 'دليفري'] as const;
+    const pm = allowedMethods.includes(inv.payment_method as typeof allowedMethods[number])
+      ? (inv.payment_method as ActiveCartTab['paymentMethod'])
+      : 'نقدي';
+
+    const editTabId = Date.now();
+    const editTab: ActiveCartTab = {
+      id: editTabId,
+      title: `تعديل #${inv.invoice_number}`,
+      items: data.items,
+      discount: inv.discount || 0,
+      paymentMethod: pm,
+      paidAmount: Math.max(0, (inv.total_selling_price || 0) - (inv.discount || 0)),
+      clientName: inv.client_name || '',
+      clientPhone: inv.client_phone || '',
+      clientAddress: inv.client_address || '',
+      editingInvoiceNumber: inv.invoice_number,
+      editingOverridePin: overridePin
+    };
+
+    setTabs((prev) => {
+      const existingIdx = prev.findIndex((t) => t.editingInvoiceNumber === inv.invoice_number);
+      if (existingIdx >= 0) {
+        const next = [...prev];
+        next[existingIdx] = { ...editTab, id: prev[existingIdx].id };
+        setActiveTabId(prev[existingIdx].id);
+        return next;
+      }
+      if (prev.length === 1 && prev[0].items.length === 0 && !prev[0].editingInvoiceNumber) {
+        setActiveTabId(prev[0].id);
+        return [{ ...editTab, id: prev[0].id }];
+      }
+      setActiveTabId(editTabId);
+      return [...prev, editTab];
+    });
+
+    onClearPendingEditInvoice?.();
+    showNotification(`تم تحميل الفاتورة #${inv.invoice_number} في وضع التعديل`, 'info');
+  }, [pendingEditInvoice, onClearPendingEditInvoice]);
 
   const updateCurrentTab = (updater: (prev: ActiveCartTab) => ActiveCartTab, targetTabId?: number) => {
     const targetId = targetTabId ?? activeTabId;
@@ -483,10 +544,29 @@ export const PosView: React.FC<PosViewProps> = ({ currentUser }) => {
       };
 
       if (window.electronAPI) {
-        const result = await window.electronAPI.createSaleInvoice(payload);
+        let result: CreateSaleInvoiceResult;
+        if (currentTab.editingInvoiceNumber) {
+          const updatePayload: UpdateSaleInvoicePayload = {
+            ...payload,
+            invoice_number: currentTab.editingInvoiceNumber,
+            editor_user_id: currentUser?.user_id || 99,
+            editor_user_name: currentUser?.user_name || 'مدير الصيدلية',
+            editor_role: currentUser?.role || 'ADMIN',
+            manager_override_pin: currentTab.editingOverridePin
+          };
+          result = await window.electronAPI.updateSavedSaleInvoice(updatePayload);
+        } else {
+          result = await window.electronAPI.createSaleInvoice(payload);
+        }
+
         if (result.success) {
           playCheckoutChime();
-          showNotification(`تم حفظ الفاتورة #${result.invoice_number} بنجاح وتحديث الخزينة والرصيد!`, 'success');
+          showNotification(
+            currentTab.editingInvoiceNumber
+              ? `تم تعديل الفاتورة #${result.invoice_number} وحفظ المراجعة بنجاح!`
+              : `تم حفظ الفاتورة #${result.invoice_number} بنجاح وتحديث الخزينة والرصيد!`,
+            'success'
+          );
           window.dispatchEvent(new CustomEvent('refresh-app-stats'));
 
           if (openPrintModal) {
@@ -502,12 +582,15 @@ export const PosView: React.FC<PosViewProps> = ({ currentUser }) => {
           } else {
             updateCurrentTab(tab => ({
               ...tab,
+              title: 'فاتورة 1',
               items: [],
               discount: 0,
               paidAmount: 0,
               clientName: '',
               clientPhone: '',
-              clientAddress: ''
+              clientAddress: '',
+              editingInvoiceNumber: undefined,
+              editingOverridePin: undefined
             }));
           }
         }
@@ -680,6 +763,44 @@ export const PosView: React.FC<PosViewProps> = ({ currentUser }) => {
           </span>
         </div>
       </div>
+
+      {/* Same-Day Invoice Editing Banner */}
+      {currentTab.editingInvoiceNumber && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 rounded-xl px-4 py-2 flex items-center justify-between text-xs font-bold shadow-2xs">
+          <div className="flex items-center gap-2">
+            <Pencil className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              وضع تعديل الفاتورة رقم #{currentTab.editingInvoiceNumber} — الحفظ سيحدث نفس الرقم مع حفظ سجل المراجعة
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (tabs.length > 1) {
+                const remaining = tabs.filter(t => t.id !== currentTab.id);
+                setTabs(remaining);
+                setActiveTabId(remaining[0].id);
+              } else {
+                updateCurrentTab(tab => ({
+                  ...tab,
+                  title: 'فاتورة 1',
+                  items: [],
+                  discount: 0,
+                  paidAmount: 0,
+                  clientName: '',
+                  clientPhone: '',
+                  clientAddress: '',
+                  editingInvoiceNumber: undefined,
+                  editingOverridePin: undefined
+                }));
+              }
+            }}
+            className="px-2.5 py-1 rounded-lg bg-white border border-amber-300 text-amber-800 hover:bg-amber-100 text-[11px] cursor-pointer"
+          >
+            إلغاء التعديل
+          </button>
+        </div>
+      )}
 
       {/* 2. Smart Barcode & Search Input */}
       <div>

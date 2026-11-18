@@ -12,7 +12,7 @@ import { ReportsAnalyticsView } from './views/ReportsAnalyticsView';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { DataLocationModal } from './components/DataLocationModal';
 import { LoginScreen } from './components/auth/LoginScreen';
-import { DashboardStats, BackupStatus, StorageInfo, AuthSession } from '../../shared/types';
+import { DashboardStats, BackupStatus, StorageInfo, AuthSession, EditableSaleInvoiceData } from '../../shared/types';
 import { CheckCircle2, AlertCircle, X } from 'lucide-react';
 
 const AUTH_SESSION_STORAGE_KEY = 'titan_auth_session';
@@ -52,6 +52,10 @@ export const App: React.FC = () => {
     discount_pct?: number;
     expiry_date?: string;
   }> | null>(null);
+  const [pendingEditInvoice, setPendingEditInvoice] = useState<{
+    data: EditableSaleInvoiceData;
+    overridePin?: string;
+  } | null>(null);
 
   const showToast = useCallback((message: string, type: 'success' | 'info' | 'error' = 'info') => {
     setToast({ message, type });
@@ -293,7 +297,11 @@ export const App: React.FC = () => {
             {/* POS View is kept mounted so active invoices, cart tabs & focus are strictly preserved */}
             <div className={activeTab === 'pos' ? 'block' : 'hidden'}>
               <ErrorBoundary fallbackTab={() => navigateToTab('pos')}>
-                <PosView currentUser={currentUser} />
+                <PosView
+                  currentUser={currentUser}
+                  pendingEditInvoice={pendingEditInvoice}
+                  onClearPendingEditInvoice={() => setPendingEditInvoice(null)}
+                />
               </ErrorBoundary>
             </div>
 
@@ -302,7 +310,15 @@ export const App: React.FC = () => {
                 <DashboardView stats={stats} loadingStats={loadingStats} />
               )}
 
-              {activeTab === 'sales_invoices' && <SalesInvoicesView currentUser={currentUser} />}
+              {activeTab === 'sales_invoices' && (
+                <SalesInvoicesView
+                  currentUser={currentUser}
+                  onEditInvoice={(data, overridePin) => {
+                    setPendingEditInvoice({ data, overridePin });
+                    navigateToTab('pos');
+                  }}
+                />
+              )}
 
               {activeTab === 'catalog' && canAccessTab('catalog', currentUser) && <CatalogInventoryView />}
 

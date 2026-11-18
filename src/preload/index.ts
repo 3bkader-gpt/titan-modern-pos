@@ -40,7 +40,12 @@ import {
   SupplierStatementReport,
   RecordSupplierPaymentPayload,
   CreatePurchaseReturnPayload,
-  PurchaseReturnRecord
+  PurchaseReturnRecord,
+  UserRole,
+  InvoiceEditEligibility,
+  EditableSaleInvoiceData,
+  UpdateSaleInvoicePayload,
+  InvoiceRevisionEntry
 } from '../shared/types';
 
 export const electronAPI = {
@@ -237,7 +242,20 @@ export const electronAPI = {
     ipcRenderer.invoke('auth:saveUser', payload),
 
   getLoginAuditLogs: (limit?: number): Promise<LoginAuditEntry[]> =>
-    ipcRenderer.invoke('auth:getLoginAuditLogs', limit)
+    ipcRenderer.invoke('auth:getLoginAuditLogs', limit),
+
+  // Module 3: Same-Day Unsave & Edit Sales Invoice APIs
+  checkCanEditSaleInvoice: (invoiceNumber: number, currentUserId: number, currentUserRole: UserRole): Promise<InvoiceEditEligibility> =>
+    ipcRenderer.invoke('pos:checkCanEditInvoice', invoiceNumber, currentUserId, currentUserRole),
+
+  getSaleInvoiceForEdit: (invoiceNumber: number): Promise<EditableSaleInvoiceData | null> =>
+    ipcRenderer.invoke('pos:getInvoiceForEdit', invoiceNumber),
+
+  updateSavedSaleInvoice: (payload: UpdateSaleInvoicePayload): Promise<CreateSaleInvoiceResult> =>
+    ipcRenderer.invoke('pos:updateSavedInvoice', payload),
+
+  getInvoiceRevisions: (invoiceNumber: number): Promise<InvoiceRevisionEntry[]> =>
+    ipcRenderer.invoke('pos:getInvoiceRevisions', invoiceNumber)
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

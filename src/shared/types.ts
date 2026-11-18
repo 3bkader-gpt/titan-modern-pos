@@ -38,8 +38,15 @@ export interface SalesInvoice {
   discount?: number;
   payment_method?: string;
   client_name?: string;
+  client_phone?: string;
+  client_address?: string;
+  notes?: string;
   user_id?: number;
   cashier_name?: string;
+  edit_count?: number;
+  last_edited_at?: string;
+  last_edited_by?: string;
+  is_locked?: number;
 }
 
 export interface SalesInvoiceItem {
@@ -569,6 +576,62 @@ export interface SaveUserPayload {
   max_discount_pct?: number;
   commission_pct?: number;
   is_active?: number;
+}
+
+export interface InvoiceEditEligibility {
+  can_edit: boolean;
+  reason?: string;
+  requires_manager_override?: boolean;
+  invoice?: SalesInvoice;
+}
+
+export interface EditableSaleInvoiceLine {
+  item_id: number;
+  item_name: string;
+  item_name_ar?: string;
+  generic_name?: string;
+  quantity: number;
+  unit_type: 'pack' | 'unit';
+  package_units: number;
+  unit_price: number;
+  cost_price: number;
+  discount_pct: number;
+  line_total: number;
+  tax_schedule_category?: number | null;
+  current_stock: number;
+  base_consumer_price: number;
+  base_buy_price: number;
+}
+
+export interface EditableSaleInvoiceData {
+  invoice: SalesInvoice;
+  items: EditableSaleInvoiceLine[];
+}
+
+export interface UpdateSaleInvoicePayload extends CreateSaleInvoicePayload {
+  invoice_number: number;
+  editor_user_id: number;
+  editor_user_name: string;
+  editor_role: UserRole;
+  manager_override_pin?: string;
+  reason?: string;
+}
+
+export interface InvoiceRevisionEntry {
+  revision_id: number;
+  invoice_id: number;
+  revision_number: number;
+  edited_by_user_id: number;
+  edited_by_user_name: string;
+  authorized_by_name?: string;
+  old_total: number;
+  new_total: number;
+  old_payment_method: string;
+  new_payment_method: string;
+  old_snapshot_json: string;
+  new_snapshot_json: string;
+  reason?: string;
+  created_at: string;
 }
 
 export interface AuditLogs {

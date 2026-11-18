@@ -50,7 +50,11 @@ import {
   authenticateUser,
   verifyManagerOverride,
   saveOrUpdateUserAccount,
-  getLoginAuditLogs
+  getLoginAuditLogs,
+  checkCanEditSaleInvoice,
+  getSaleInvoiceForEdit,
+  updateSavedSaleInvoice,
+  getInvoiceRevisions
 } from './db';
 import { 
   performBackup, 
@@ -75,7 +79,9 @@ import {
   RecordTreasuryTransactionPayload,
   SaveUserPayload,
   RecordSupplierPaymentPayload,
-  CreatePurchaseReturnPayload
+  CreatePurchaseReturnPayload,
+  UserRole,
+  UpdateSaleInvoicePayload
 } from '../shared/types';
 
 import fs from 'fs';
@@ -369,6 +375,23 @@ function registerIpcHandlers() {
 
   ipcMain.handle('auth:getLoginAuditLogs', async (_event, limit?: number) => {
     return getLoginAuditLogs(limit);
+  });
+
+  // Module 3: Same-Day Unsave & Edit Sales Invoice Handlers
+  ipcMain.handle('pos:checkCanEditInvoice', async (_event, invoiceNumber: number, currentUserId: number, currentUserRole: UserRole) => {
+    return checkCanEditSaleInvoice(invoiceNumber, currentUserId, currentUserRole);
+  });
+
+  ipcMain.handle('pos:getInvoiceForEdit', async (_event, invoiceNumber: number) => {
+    return getSaleInvoiceForEdit(invoiceNumber);
+  });
+
+  ipcMain.handle('pos:updateSavedInvoice', async (_event, payload: UpdateSaleInvoicePayload) => {
+    return updateSavedSaleInvoice(payload);
+  });
+
+  ipcMain.handle('pos:getInvoiceRevisions', async (_event, invoiceNumber: number) => {
+    return getInvoiceRevisions(invoiceNumber);
   });
 }
 

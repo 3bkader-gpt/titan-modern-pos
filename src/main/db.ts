@@ -43,6 +43,11 @@ import {
   AuthSession,
   LoginAuditEntry,
   SaveUserPayload,
+  InvoiceEditEligibility,
+  EditableSaleInvoiceLine,
+  EditableSaleInvoiceData,
+  UpdateSaleInvoicePayload,
+  InvoiceRevisionEntry,
   AuditLogs,
   LedgerIntegrityStatus
 } from '../shared/types';
@@ -268,6 +273,32 @@ function ensureSchemaUpgrades(database: Database.Database) {
       );
       CREATE INDEX IF NOT EXISTS idx_pur_ret_supp ON purchase_returns(supplier_id);
       CREATE INDEX IF NOT EXISTS idx_pur_ret_items_ret ON purchase_return_items(return_id);
+    `);
+
+    // M3: Same-Day Unsave & Edit Sales Invoice + Revisions Log
+    safeAddColumn('sales_invoices', 'edit_count INTEGER DEFAULT 0');
+    safeAddColumn('sales_invoices', "last_edited_at TEXT DEFAULT ''");
+    safeAddColumn('sales_invoices', "last_edited_by TEXT DEFAULT ''");
+    safeAddColumn('sales_invoices', 'is_locked INTEGER DEFAULT 0');
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS invoice_revisions_log (
+        revision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_id INTEGER NOT NULL,
+        revision_number INTEGER NOT NULL,
+        edited_by_user_id INTEGER NOT NULL,
+        edited_by_user_name TEXT NOT NULL,
+        authorized_by_name TEXT DEFAULT '',
+        old_total REAL NOT NULL,
+        new_total REAL NOT NULL,
+        old_payment_method TEXT NOT NULL,
+        new_payment_method TEXT NOT NULL,
+        old_snapshot_json TEXT NOT NULL,
+        new_snapshot_json TEXT NOT NULL,
+        reason TEXT DEFAULT '',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_inv_rev_invoice ON invoice_revisions_log(invoice_id);
     `);
 
     // Ensure Dr. Mariam Elhomeily account exists in users table
@@ -4120,6 +4151,570 @@ export function getPurchaseReturns(supplierId?: number, limit: number = 50): Pur
     LIMIT ?
   `).all(...params) as PurchaseReturnRecord[];
 }
+
+// ============================================================================
+// MODULE 3: SAME-DAY UNSAVE & EDIT SALES INVOICE (#N)
+// ============================================================================
+
+function getSalePaymentGlAccount(paymentMethod?: string | null): string {
+  if (paymentMethod === 'نقدي' || paymentMethod === 'دليفري') {
+    return 'اصول.متداولة.نقدية.كاش';
+  }
+  if (paymentMethod === 'آجل') {
+    return 'اصول.متداولة.عملاء';
+  }
+  return 'اصول.متداولة.بنك.فيزا';
+}
+
+function adjustCustomerBalanceInTx(
+  database: Database.Database,
+  clientNameRaw: string,
+  deltaAmount: number,
+  txType: 'SALE' | 'REVERSAL',
+  notes: string,
+  invoiceNumber: number,
+  timestamp: string,
+  phone: string = '',
+  address: string = ''
+): void {
+  const clientName = clientNameRaw.trim();
+  if (!clientName || deltaAmount === 0) return;
+
+  const cust = database
+    .prepare('SELECT customer_id, account_balance FROM customers WHERE customer_name = ?')
+    .get(clientName) as { customer_id: number; account_balance: number } | undefined;
+
+  if (!cust) {
+    if (deltaAmount > 0) {
+      const maxCust = database.prepare('SELECT COALESCE(MAX(customer_id), 0) as maxId FROM customers').get() as { maxId: number };
+      const newCustId = maxCust.maxId + 1;
+      database.prepare(`
+        INSERT INTO customers (customer_id, customer_name, phone, address, account_balance)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(newCustId, clientName, phone, address, roundMoney(deltaAmount));
+      database.prepare(`
+        INSERT INTO customer_ledger (customer_id, transaction_date, transaction_type, amount, notes, invoice_number)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(newCustId, timestamp, txType, roundMoney(deltaAmount), notes, invoiceNumber);
+    }
+    return;
+  }
+
+  database.prepare(`
+    UPDATE customers SET account_balance = ROUND(account_balance + ?, 2) WHERE customer_id = ?
+  `).run(roundMoney(deltaAmount), cust.customer_id);
+
+  database.prepare(`
+    INSERT INTO customer_ledger (customer_id, transaction_date, transaction_type, amount, notes, invoice_number)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(cust.customer_id, timestamp, txType, roundMoney(deltaAmount), notes, invoiceNumber);
+}
+
+/**
+ * Evaluate whether a sales invoice is eligible for same-day reopen/edit.
+ */
+export function checkCanEditSaleInvoice(
+  invoiceNumber: number,
+  currentUserId: number,
+  currentUserRole: UserRole
+): InvoiceEditEligibility {
+  const database = getDatabaseInstance();
+  const invoice = database
+    .prepare('SELECT * FROM sales_invoices WHERE invoice_number = ?')
+    .get(invoiceNumber) as SalesInvoice | undefined;
+
+  if (!invoice) {
+    return { can_edit: false, reason: `الفاتورة رقم #${invoiceNumber} غير موجودة.` };
+  }
+
+  if (Number(invoice.is_locked || 0) === 1) {
+    return { can_edit: false, reason: 'الفاتورة مقفلة ولا يمكن تعديلها بعد إغلاق نهاية اليوم.' };
+  }
+
+  const today = getLocalDateTime().date;
+  if (invoice.invoice_date !== today) {
+    return { can_edit: false, reason: 'يُسمح بفك الحفظ وتعديل الفاتورة في نفس اليوم فقط.' };
+  }
+
+  const returnCountRow = database
+    .prepare('SELECT COUNT(*) as c FROM sales_returns WHERE invoice_number = ?')
+    .get(invoiceNumber) as { c: number };
+  if (returnCountRow.c > 0) {
+    return { can_edit: false, reason: 'لا يمكن تعديل فاتورة تم عمل مرتجع عليها مسبقاً.' };
+  }
+
+  const oldNetTotal = roundMoney((invoice.total_selling_price || 0) - (invoice.discount || 0));
+  if (invoice.payment_method === 'نقدي' || invoice.payment_method === 'دليفري') {
+    const treasury = database.prepare('SELECT cash_balance FROM treasury_state WHERE id = 1').get() as { cash_balance: number } | undefined;
+    const currentCash = roundMoney(treasury?.cash_balance ?? 0);
+    if (currentCash + 0.001 < oldNetTotal) {
+      return {
+        can_edit: false,
+        reason: 'لا توجد نقدية كافية في الخزينة لتغطية قيمة الفاتورة المراد تعديلها.'
+      };
+    }
+  }
+
+  const ownerId = Number(invoice.user_id || 99);
+  const requiresOverride = currentUserRole !== 'ADMIN' && ownerId !== currentUserId;
+
+  return {
+    can_edit: true,
+    requires_manager_override: requiresOverride,
+    invoice
+  };
+}
+
+/**
+ * Load full invoice + enriched cart lines for POS editing mode.
+ */
+export function getSaleInvoiceForEdit(invoiceNumber: number): EditableSaleInvoiceData | null {
+  const database = getDatabaseInstance();
+  const invoice = database
+    .prepare('SELECT * FROM sales_invoices WHERE invoice_number = ?')
+    .get(invoiceNumber) as SalesInvoice | undefined;
+  if (!invoice) return null;
+
+  const rows = database.prepare(`
+    SELECT si.*,
+      i.item_name_ar,
+      i.generic_name,
+      COALESCE(i.package_units, 1) as db_package_units,
+      COALESCE(i.current_stock, 0) as db_current_stock,
+      COALESCE(i.consumer_price, si.unit_price) as db_consumer_price,
+      COALESCE(i.buy_price, 0) as db_buy_price,
+      COALESCE(i.discount_pct, 0) as db_discount_pct,
+      COALESCE(i.pharmacy_discount_percent, 0) as db_pharm_disc,
+      i.tax_schedule_category
+    FROM sales_invoice_items si
+    LEFT JOIN items i ON si.item_id = i.item_id
+    WHERE si.invoice_number = ?
+    ORDER BY si.line_number ASC
+  `).all(invoiceNumber) as Array<{
+    item_id: number;
+    item_name: string;
+    quantity: number;
+    unit_price: number;
+    discount_pct: number;
+    line_total: number;
+    unit_type?: string;
+    cost_price?: number;
+    item_name_ar?: string;
+    generic_name?: string;
+    db_package_units: number;
+    db_current_stock: number;
+    db_consumer_price: number;
+    db_buy_price: number;
+    db_discount_pct: number;
+    db_pharm_disc: number;
+    tax_schedule_category?: number | null;
+  }>;
+
+  const items: EditableSaleInvoiceLine[] = rows.map((r) => {
+    const unitType: 'pack' | 'unit' = r.unit_type === 'شريط' ? 'unit' : 'pack';
+    const pkg = r.db_package_units > 1 ? r.db_package_units : 1;
+    const baseConsumer = r.db_consumer_price || r.unit_price;
+    const disc = r.db_discount_pct > 0 ? r.db_discount_pct : (r.db_pharm_disc > 0 ? r.db_pharm_disc : 25);
+    const effectivePackBuy =
+      !r.db_buy_price || r.db_buy_price <= 0 || r.db_buy_price < baseConsumer * 0.35
+        ? roundMoney(baseConsumer * (1 - disc / 100))
+        : r.db_buy_price;
+
+    return {
+      item_id: r.item_id,
+      item_name: r.item_name,
+      item_name_ar: r.item_name_ar,
+      generic_name: r.generic_name,
+      quantity: r.quantity,
+      unit_type: unitType,
+      package_units: pkg,
+      unit_price: r.unit_price,
+      cost_price: r.cost_price ?? (unitType === 'unit' ? roundMoney(effectivePackBuy / pkg) : effectivePackBuy),
+      discount_pct: r.discount_pct || 0,
+      line_total: r.line_total,
+      tax_schedule_category: r.tax_schedule_category,
+      current_stock: r.db_current_stock + (unitType === 'unit' ? Math.round((r.quantity / pkg) * 10000) / 10000 : r.quantity),
+      base_consumer_price: baseConsumer,
+      base_buy_price: effectivePackBuy
+    };
+  });
+
+  return { invoice, items };
+}
+
+/**
+ * Reopen & re-save an existing same-day sales invoice in-place keeping the exact #invoice_number.
+ */
+export function updateSavedSaleInvoice(payload: UpdateSaleInvoicePayload): CreateSaleInvoiceResult {
+  const database = getDatabaseInstance();
+
+  if (!payload.items || payload.items.length === 0) {
+    throw new Error('لا يمكن حفظ فاتورة بدون أصناف.');
+  }
+  for (const item of payload.items) {
+    if (!item.item_id || item.item_id <= 0) throw new Error('معرف الصنف غير صالح.');
+    if (!item.quantity || item.quantity <= 0 || isNaN(item.quantity)) {
+      throw new Error('كمية الصنف يجب أن تكون أكبر من الصفر.');
+    }
+  }
+  if (payload.payment_method === 'آجل' && (!payload.client_name || !payload.client_name.trim())) {
+    throw new Error('يجب تحديد اسم العميل للمبيعات الآجلة.');
+  }
+
+  const tx = database.transaction(() => {
+    const eligibility = checkCanEditSaleInvoice(
+      payload.invoice_number,
+      payload.editor_user_id,
+      payload.editor_role
+    );
+    if (!eligibility.can_edit || !eligibility.invoice) {
+      throw new Error(eligibility.reason || 'الفاتورة غير قابلة للتعديل.');
+    }
+
+    let authorizedByName = '';
+    if (eligibility.requires_manager_override) {
+      const override = verifyManagerOverride(
+        payload.manager_override_pin || '',
+        payload.editor_user_id,
+        'تعديل فاتورة نفس اليوم',
+        `INV-${payload.invoice_number}`
+      );
+      authorizedByName = override.managerName;
+    }
+
+    const oldInvoice = eligibility.invoice;
+    const invoiceNumber = oldInvoice.invoice_number;
+    const local = getLocalDateTime();
+    const invoiceDate = local.date;
+    const invoiceTime = local.time;
+    const fullTimestamp = local.timestamp;
+
+    const oldItems = database.prepare(`
+      SELECT * FROM sales_invoice_items WHERE invoice_number = ? ORDER BY line_number ASC
+    `).all(invoiceNumber) as Array<{
+      id: number;
+      item_id: number;
+      item_name: string;
+      quantity: number;
+      unit_price: number;
+      discount_pct: number;
+      line_total: number;
+      unit_type?: string;
+      cost_price?: number;
+    }>;
+
+    const oldSnapshotJson = JSON.stringify({
+      payment_method: oldInvoice.payment_method,
+      discount: oldInvoice.discount || 0,
+      total_selling_price: oldInvoice.total_selling_price,
+      items: oldItems
+    });
+
+    // 1. Restore stock for old lines
+    const getPkgStmt = database.prepare('SELECT package_units FROM items WHERE item_id = ?');
+    const restoreStockStmt = database.prepare('UPDATE items SET current_stock = ROUND(current_stock + ?, 4) WHERE item_id = ?');
+    for (const oldLine of oldItems) {
+      let restoreQty = oldLine.quantity;
+      if (oldLine.unit_type === 'شريط') {
+        const pkgRow = getPkgStmt.get(oldLine.item_id) as { package_units?: number } | undefined;
+        const pkg = pkgRow?.package_units && pkgRow.package_units > 1 ? pkgRow.package_units : 1;
+        restoreQty = Math.round((oldLine.quantity / pkg) * 10000) / 10000;
+      }
+      restoreStockStmt.run(restoreQty, oldLine.item_id);
+    }
+
+    // 2. Reverse old financial effect
+    const oldNetTotal = roundMoney((oldInvoice.total_selling_price || 0) - (oldInvoice.discount || 0));
+    if (oldInvoice.payment_method === 'نقدي' || oldInvoice.payment_method === 'دليفري') {
+      const treasuryRow = database.prepare('SELECT cash_balance FROM treasury_state WHERE id = 1').get() as { cash_balance: number };
+      const curCash = roundMoney(treasuryRow?.cash_balance ?? 0);
+      if (curCash + 0.001 < oldNetTotal) {
+        throw new Error('لا توجد نقدية كافية في الخزينة لتغطية قيمة الفاتورة المراد تعديلها.');
+      }
+      database.prepare(`
+        UPDATE treasury_state SET cash_balance = ROUND(cash_balance - ?, 2), last_updated = ? WHERE id = 1
+      `).run(oldNetTotal, fullTimestamp);
+    } else if (oldInvoice.payment_method === 'آجل' && oldInvoice.client_name) {
+      adjustCustomerBalanceInTx(
+        database,
+        oldInvoice.client_name,
+        -oldNetTotal,
+        'REVERSAL',
+        `عكس أثر تعديل الفاتورة #${invoiceNumber}`,
+        invoiceNumber,
+        fullTimestamp
+      );
+    }
+
+    const revNumRow = database
+      .prepare('SELECT COALESCE(MAX(revision_number), 0) as m FROM invoice_revisions_log WHERE invoice_id = ?')
+      .get(invoiceNumber) as { m: number };
+    const nextRevNum = revNumRow.m + 1;
+
+    // 3. Post explicit GL reversal for old invoice amounts
+    if (oldNetTotal > 0) {
+      const oldDebitAcc = getSalePaymentGlAccount(oldInvoice.payment_method);
+      postBalancedGlLines(database, invoiceDate, `INV-${invoiceNumber}-REV-${nextRevNum}`, [
+        {
+          account_name: 'ايرادات.مبيعات',
+          notes: `عكس مبيعات تعديل فاتورة #${invoiceNumber} (مراجعة ${nextRevNum})`,
+          debit: oldNetTotal,
+          credit: 0
+        },
+        {
+          account_name: oldDebitAcc,
+          notes: `عكس تحصيل تعديل فاتورة #${invoiceNumber} (مراجعة ${nextRevNum})`,
+          debit: 0,
+          credit: oldNetTotal
+        }
+      ]);
+    }
+
+    // 4. Compute new line pricing & totals
+    const getItemPricingStmt = database.prepare(`
+      SELECT item_id, item_name_en, consumer_price, buy_price, discount_pct, pharmacy_discount_percent, package_units
+      FROM items WHERE item_id = ?
+    `);
+
+    let totalSellingPrice = 0;
+    let totalCostPrice = 0;
+
+    for (const item of payload.items) {
+      const itemDb = getItemPricingStmt.get(item.item_id) as {
+        item_id: number;
+        item_name_en: string;
+        consumer_price: number;
+        buy_price: number;
+        discount_pct: number;
+        pharmacy_discount_percent: number;
+        package_units: number;
+      } | undefined;
+      if (!itemDb) {
+        throw new Error(`الصنف رقم #${item.item_id} غير موجود في قاعدة البيانات.`);
+      }
+
+      const pkgUnits = itemDb.package_units && itemDb.package_units > 1 ? itemDb.package_units : 1;
+      item.package_units = pkgUnits;
+
+      const unitPrice =
+        item.unit_type === 'unit'
+          ? roundMoney(itemDb.consumer_price / pkgUnits)
+          : itemDb.consumer_price;
+      item.unit_price = unitPrice;
+
+      const discPct = Math.min(100, Math.max(0, Number(item.discount_pct || 0)));
+      item.discount_pct = discPct;
+      item.line_total = roundMoney(item.quantity * unitPrice * (1 - discPct / 100));
+      totalSellingPrice = roundMoney(totalSellingPrice + item.line_total);
+
+      const cp = itemDb.consumer_price || unitPrice;
+      const bp = itemDb.buy_price || 0;
+      const disc =
+        itemDb.discount_pct > 0
+          ? itemDb.discount_pct
+          : (itemDb.pharmacy_discount_percent > 0 ? itemDb.pharmacy_discount_percent : 25);
+      const effectivePackCost = bp <= 0 || bp < cp * 0.35 ? roundMoney(cp * (1 - disc / 100)) : bp;
+      const effectiveCost = item.unit_type === 'unit' && pkgUnits > 1 ? roundMoney(effectivePackCost / pkgUnits) : effectivePackCost;
+      item.cost_price = effectiveCost;
+      totalCostPrice = roundMoney(totalCostPrice + effectiveCost * item.quantity);
+    }
+
+    const discount = Math.max(0, Math.min(totalSellingPrice, roundMoney(payload.discount || 0)));
+    const netTotal = Math.max(0, roundMoney(totalSellingPrice - discount));
+    const profit = roundMoney(netTotal - totalCostPrice);
+
+    const paid = payload.paid_amount !== undefined && payload.paid_amount !== null ? payload.paid_amount : netTotal;
+    if ((payload.payment_method === 'نقدي' || payload.payment_method === 'دليفري') && paid + 0.001 < netTotal) {
+      throw new Error(`المبلغ المدفوع (${paid} ج.م) أقل من إجمالي الفاتورة المطلوبة (${netTotal} ج.م).`);
+    }
+    const change = Math.max(0, roundMoney(paid - netTotal));
+
+    // 5. Update same invoice row #N & replace line items
+    database.prepare(`
+      UPDATE sales_invoices
+      SET item_count = ?,
+          total_selling_price = ?,
+          total_cost_price = ?,
+          profit = ?,
+          discount = ?,
+          payment_method = ?,
+          client_name = ?,
+          client_phone = ?,
+          client_address = ?,
+          notes = ?,
+          edit_count = COALESCE(edit_count, 0) + 1,
+          last_edited_at = ?,
+          last_edited_by = ?
+      WHERE invoice_number = ?
+    `).run(
+      payload.items.length,
+      totalSellingPrice,
+      totalCostPrice,
+      profit,
+      discount,
+      payload.payment_method,
+      payload.client_name || '',
+      payload.client_phone || '',
+      payload.client_address || '',
+      payload.notes || '',
+      fullTimestamp,
+      payload.editor_user_name,
+      invoiceNumber
+    );
+
+    database.prepare('DELETE FROM sales_invoice_items WHERE invoice_number = ?').run(invoiceNumber);
+
+    const maxItemRow = database.prepare('SELECT COALESCE(MAX(id), 0) as maxId FROM sales_invoice_items').get() as { maxId: number };
+    let currentItemId = maxItemRow.maxId;
+    const maxShortageRow = database.prepare('SELECT COALESCE(MAX(id), 0) as maxId FROM shortages_drafts').get() as { maxId: number };
+    let currentShortageId = maxShortageRow.maxId;
+
+    const insertItemStmt = database.prepare(`
+      INSERT INTO sales_invoice_items (
+        id, invoice_number, line_number, item_id, item_name, quantity, unit_price, discount_pct, line_total, invoice_date, invoice_time, unit_type, cost_price
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const deductStockStmt = database.prepare('UPDATE items SET current_stock = ROUND(current_stock - ?, 4) WHERE item_id = ?');
+    const checkShortageStmt = database.prepare('SELECT count(*) as count FROM shortages_drafts WHERE item_id = ?');
+    const insertShortageStmt = database.prepare(`
+      INSERT INTO shortages_drafts (id, supplier_id, supplier_name, item_id, item_name, quantity, order_code)
+      VALUES (?, 1, 'الشراء من غير الموردين', ?, ?, 1, '')
+    `);
+
+    let lineNumber = 1;
+    for (const item of payload.items) {
+      currentItemId++;
+      insertItemStmt.run(
+        currentItemId,
+        invoiceNumber,
+        lineNumber++,
+        item.item_id,
+        item.item_name,
+        item.quantity,
+        item.unit_price,
+        item.discount_pct || 0,
+        item.line_total,
+        invoiceDate,
+        fullTimestamp,
+        item.unit_type === 'unit' ? 'شريط' : 'عبوة',
+        item.cost_price || 0
+      );
+
+      let deductQty = item.quantity;
+      if (item.unit_type === 'unit') {
+        const pkg = item.package_units && item.package_units > 1 ? item.package_units : 1;
+        deductQty = Math.round((item.quantity / pkg) * 10000) / 10000;
+      }
+      deductStockStmt.run(deductQty, item.item_id);
+
+      const curStockRow = database.prepare('SELECT current_stock, item_name_en FROM items WHERE item_id = ?').get(item.item_id) as { current_stock: number; item_name_en: string } | undefined;
+      if (curStockRow && curStockRow.current_stock <= 0) {
+        const existing = checkShortageStmt.get(item.item_id) as { count: number };
+        if (existing.count === 0) {
+          currentShortageId++;
+          insertShortageStmt.run(currentShortageId, item.item_id, curStockRow.item_name_en);
+        }
+      }
+    }
+
+    // 6. Apply new payment method balances & GL
+    if (payload.payment_method === 'نقدي' || payload.payment_method === 'دليفري') {
+      database.prepare(`
+        UPDATE treasury_state SET cash_balance = ROUND(cash_balance + ?, 2), last_updated = ? WHERE id = 1
+      `).run(netTotal, fullTimestamp);
+    } else if (payload.payment_method === 'آجل' && payload.client_name) {
+      adjustCustomerBalanceInTx(
+        database,
+        payload.client_name,
+        netTotal,
+        'SALE',
+        `فاتورة مبيعات آجل معدلة #${invoiceNumber}`,
+        invoiceNumber,
+        fullTimestamp,
+        payload.client_phone || '',
+        payload.client_address || ''
+      );
+    }
+
+    if (netTotal > 0) {
+      const newDebitAcc = getSalePaymentGlAccount(payload.payment_method);
+      postBalancedGlLines(database, invoiceDate, `INV-${invoiceNumber}-EDIT-${nextRevNum}`, [
+        {
+          account_name: newDebitAcc,
+          notes: `مبيعات ${payload.payment_method} فاتورة معدلة #${invoiceNumber}`,
+          debit: netTotal,
+          credit: 0
+        },
+        {
+          account_name: 'ايرادات.مبيعات',
+          notes: `إيراد مبيعات فاتورة معدلة #${invoiceNumber}`,
+          debit: 0,
+          credit: netTotal
+        }
+      ]);
+    }
+
+    // 7. Save full revision audit entry
+    const newSnapshotJson = JSON.stringify({
+      payment_method: payload.payment_method,
+      discount,
+      total_selling_price: totalSellingPrice,
+      items: payload.items
+    });
+
+    database.prepare(`
+      INSERT INTO invoice_revisions_log (
+        invoice_id, revision_number, edited_by_user_id, edited_by_user_name, authorized_by_name,
+        old_total, new_total, old_payment_method, new_payment_method,
+        old_snapshot_json, new_snapshot_json, reason, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      invoiceNumber,
+      nextRevNum,
+      payload.editor_user_id,
+      payload.editor_user_name,
+      authorizedByName,
+      oldNetTotal,
+      netTotal,
+      oldInvoice.payment_method || 'نقدي',
+      payload.payment_method,
+      oldSnapshotJson,
+      newSnapshotJson,
+      payload.reason || 'تعديل فاتورة نفس اليوم',
+      fullTimestamp
+    );
+
+    return {
+      success: true,
+      invoice_number: invoiceNumber,
+      invoice_date: oldInvoice.invoice_date,
+      invoice_time: invoiceTime,
+      total_selling_price: totalSellingPrice,
+      total_cost_price: totalCostPrice,
+      profit,
+      discount,
+      payment_method: payload.payment_method,
+      item_count: payload.items.length,
+      change,
+      items: payload.items,
+      client_name: payload.client_name,
+      client_phone: payload.client_phone,
+      client_address: payload.client_address
+    };
+  });
+
+  return tx();
+}
+
+export function getInvoiceRevisions(invoiceNumber: number): InvoiceRevisionEntry[] {
+  const database = getDatabaseInstance();
+  return database.prepare(`
+    SELECT * FROM invoice_revisions_log
+    WHERE invoice_id = ?
+    ORDER BY revision_number DESC
+  `).all(invoiceNumber) as InvoiceRevisionEntry[];
+}
+
 
 
 

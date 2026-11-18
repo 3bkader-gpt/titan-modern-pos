@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { SalesInvoice, SalesInvoiceItem, AuthSession } from '../../../shared/types';
+import { SalesInvoice, SalesInvoiceItem, AuthSession, EditableSaleInvoiceData, InvoiceRevisionEntry } from '../../../shared/types';
 import {
   Receipt,
   Search,
@@ -10,14 +10,19 @@ import {
   CreditCard,
   Package,
   RotateCcw,
-  TrendingUp
+  TrendingUp,
+  Pencil,
+  History,
+  X
 } from 'lucide-react';
 import { QuickReturnModal } from '../components/pos/QuickReturnModal';
+import { ManagerOverrideModal } from '../components/auth/ManagerOverrideModal';
 
 type DateRangeFilter = 'today' | 'yesterday' | 'week' | 'all';
 
 interface SalesInvoicesViewProps {
   currentUser?: AuthSession | null;
+  onEditInvoice?: (data: EditableSaleInvoiceData, overridePin?: string) => void;
 }
 
 function getLocalDateStr(offsetDays: number = 0): string {
@@ -29,7 +34,7 @@ function getLocalDateStr(offsetDays: number = 0): string {
   return `${y}-${m}-${day}`;
 }
 
-export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUser }) => {
+export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUser, onEditInvoice }) => {
   const isAdmin = !currentUser || currentUser.role === 'ADMIN';
   const [invoices, setInvoices] = useState<SalesInvoice[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -39,6 +44,58 @@ export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUse
   const [selectedItems, setSelectedItems] = useState<SalesInvoiceItem[]>([]);
   const [loadingItems, setLoadingItems] = useState<boolean>(false);
   const [showReturnModal, setShowReturnModal] = useState<boolean>(false);
+  const [editErrorMsg, setEditErrorMsg] = useState<string>('');
+  const [pendingOverrideInvoiceNum, setPendingOverrideInvoiceNum] = useState<number | null>(null);
+  const [revisionsModalNum, setRevisionsModalNum] = useState<number | null>(null);
+  const [revisionsList, setRevisionsList] = useState<InvoiceRevisionEntry[]>([]);
+
+  const proceedToLoadInvoiceForEdit = async (invoiceNumber: number, overridePin?: string) => {
+    try {
+      const editable = await window.electronAPI.getSaleInvoiceForEdit(invoiceNumber);
+      if (!editable) {
+        setEditErrorMsg('تعذر تحميل بيانات الفاتورة للتعديل.');
+        return;
+      }
+      if (onEditInvoice) {
+        onEditInvoice(editable, overridePin);
+      }
+    } catch (err: unknown) {
+      setEditErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleRequestEditInvoice = async () => {
+    if (!selectedInvoice || !currentUser) return;
+    setEditErrorMsg('');
+    try {
+      const check = await window.electronAPI.checkCanEditSaleInvoice(
+        selectedInvoice.invoice_number,
+        currentUser.user_id,
+        currentUser.role
+      );
+      if (!check.can_edit) {
+        setEditErrorMsg(check.reason || 'الفاتورة غير متاحة للتعديل.');
+        return;
+      }
+      if (check.requires_manager_override) {
+        setPendingOverrideInvoiceNum(selectedInvoice.invoice_number);
+        return;
+      }
+      await proceedToLoadInvoiceForEdit(selectedInvoice.invoice_number);
+    } catch (err: unknown) {
+      setEditErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleOpenRevisions = async (invoiceNumber: number) => {
+    try {
+      const list = await window.electronAPI.getInvoiceRevisions(invoiceNumber);
+      setRevisionsList(list || []);
+      setRevisionsModalNum(invoiceNumber);
+    } catch {
+      setRevisionsList([]);
+    }
+  };
 
   const loadInvoices = useCallback(async () => {
     setLoading(true);
@@ -231,6 +288,17 @@ export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUse
             ))}
           </div>
 
+          {selectedInvoice && onEditInvoice && (
+            <button
+              type="button"
+              onClick={() => void handleRequestEditInvoice()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-bold transition-colors cursor-pointer"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              <span>تعديل الفاتورة (نفس اليوم)</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setShowReturnModal(true)}
@@ -250,6 +318,15 @@ export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUse
           </button>
         </div>
       </div>
+
+      {editErrorMsg && (
+        <div className="px-4 py-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold flex items-center justify-between">
+          <span>{editErrorMsg}</span>
+          <button type="button" onClick={() => setEditErrorMsg('')} className="p-0.5 hover:bg-rose-100 rounded">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Summary Strip */}
       <div className={`grid gap-3 ${isAdmin ? 'grid-cols-3' : 'grid-cols-2'}`}>
@@ -362,6 +439,17 @@ export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUse
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
                       {selectedInvoice.payment_method || 'نقدي'}
                     </span>
+                    {(selectedInvoice.edit_count || 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenRevisions(selectedInvoice.invoice_number)}
+                        className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1 cursor-pointer"
+                        title="عرض سجل التعديلات"
+                      >
+                        <History className="w-3 h-3" />
+                        <span>معدّلة ({selectedInvoice.edit_count})</span>
+                      </button>
+                    )}
                   </div>
                   <div className="flex items-center gap-3 text-[11px] text-slate-500 mt-0.5 font-mono">
                     <span className="flex items-center gap-1">
@@ -478,6 +566,68 @@ export const SalesInvoicesView: React.FC<SalesInvoicesViewProps> = ({ currentUse
           window.dispatchEvent(new Event('refresh-app-stats'));
         }}
       />
+
+      {/* Manager Override Modal for editing another cashier's same-day invoice */}
+      {currentUser && (
+        <ManagerOverrideModal
+          isOpen={pendingOverrideInvoiceNum !== null}
+          currentUserId={currentUser.user_id}
+          actionLabel="تعديل فاتورة موظف آخر (نفس اليوم)"
+          targetRef={pendingOverrideInvoiceNum ? `#${pendingOverrideInvoiceNum}` : ''}
+          onClose={() => setPendingOverrideInvoiceNum(null)}
+          onAuthorized={({ pinCode }) => {
+            const invNum = pendingOverrideInvoiceNum;
+            setPendingOverrideInvoiceNum(null);
+            if (invNum !== null) {
+              void proceedToLoadInvoiceForEdit(invNum, pinCode);
+            }
+          }}
+        />
+      )}
+
+      {/* Revisions History Modal */}
+      {revisionsModalNum !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4"
+          data-modal-open="true"
+          dir="rtl"
+        >
+          <div className="w-full max-w-xl bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
+            <div className="px-5 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">
+                سجل تعديلات الفاتورة #{revisionsModalNum}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setRevisionsModalNum(null)}
+                className="p-1 rounded-lg hover:bg-slate-200 text-slate-500 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 max-h-96 overflow-y-auto space-y-2 text-xs">
+              {revisionsList.length === 0 ? (
+                <div className="text-center text-slate-400 py-6">لا توجد تعديلات مسجلة</div>
+              ) : (
+                revisionsList.map((rev) => (
+                  <div key={rev.revision_id} className="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900">
+                        تعديل #{rev.revision_number} — {rev.edited_by_user_name}
+                        {rev.authorized_by_name ? ` (بتفويض: ${rev.authorized_by_name})` : ''}
+                      </span>
+                      <span className="font-mono text-[11px] text-slate-500">{rev.created_at}</span>
+                    </div>
+                    <div className="font-mono text-slate-700">
+                      من: {rev.old_total.toFixed(2)} ج.م ({rev.old_payment_method}) ← إلى: {rev.new_total.toFixed(2)} ج.م ({rev.new_payment_method})
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
